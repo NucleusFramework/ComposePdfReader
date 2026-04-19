@@ -37,6 +37,18 @@ internal object PdfiumBridge {
         flags: Int,
     ): Boolean
     @JvmStatic external fun nGetPageText(page: Long): String?
+    @JvmStatic external fun nCountTextRects(page: Long): Int
+    @JvmStatic external fun nExtractTextRects(
+        page: Long,
+        outBoxes: FloatArray,
+        outTexts: Array<String?>,
+    ): Int
+    @JvmStatic external fun nCountPageChars(page: Long): Int
+    @JvmStatic external fun nExtractCharBoxes(
+        page: Long,
+        outCodepoints: IntArray,
+        outBoxes: FloatArray,
+    ): Int
 
     @JvmStatic external fun nAllocBuffer(data: ByteArray): Long
     @JvmStatic external fun nFreeBuffer(address: Long)

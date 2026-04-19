@@ -37,6 +37,25 @@ internal object PdfiumBridge {
         flags: Int,
     ): Boolean
     @JvmStatic external fun nGetPageText(page: Long): String?
+    /** Count of line-level text rectangles on the given page. */
+    @JvmStatic external fun nCountTextRects(page: Long): Int
+    /** Fill pre-sized arrays with rect coords (left, bottom, right, top in points) + UTF-8 text. */
+    @JvmStatic external fun nExtractTextRects(
+        page: Long,
+        outBoxes: FloatArray,
+        outTexts: Array<String?>,
+    ): Int
+    /** Count of per-glyph characters (includes spaces and generated chars). */
+    @JvmStatic external fun nCountPageChars(page: Long): Int
+    /**
+     * Fill [outCodepoints] and [outBoxes] with per-character data. [outBoxes] holds 4 floats
+     * per char: left, bottom, right, top in PDF page points.
+     */
+    @JvmStatic external fun nExtractCharBoxes(
+        page: Long,
+        outCodepoints: IntArray,
+        outBoxes: FloatArray,
+    ): Int
 
     // Shared-buffer document pool support:
     /** Allocate a native buffer holding [data]. Returns a raw pointer; free with [nFreeBuffer]. */

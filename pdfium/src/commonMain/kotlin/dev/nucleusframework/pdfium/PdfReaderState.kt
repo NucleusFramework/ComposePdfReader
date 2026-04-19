@@ -102,6 +102,12 @@ class PdfReaderState internal constructor(
         return doc.pageText(pageIndex)
     }
 
+    suspend fun pageTextLayout(pageIndex: Int): PageTextLayout? {
+        val doc = document ?: return null
+        if (pageIndex !in 0 until pageCount) return null
+        return doc.pageTextLayout(pageIndex)
+    }
+
     fun dispose() {
         scope.launch {
             openMutex.withLock {

@@ -111,8 +111,6 @@ private fun WideReaderLayout(
             ReaderSurface(
                 reader = state.reader,
                 listState = state.mainListState,
-                onCopyTextRequest = state::copyPageText,
-                onSelectTextRequest = state::showTextDialog,
                 onOpenClick = onOpenClick,
                 onViewportChange = state::updateViewport,
             )
@@ -141,8 +139,6 @@ private fun NarrowReaderLayout(
             ReaderSurface(
                 reader = state.reader,
                 listState = state.mainListState,
-                onCopyTextRequest = state::copyPageText,
-                onSelectTextRequest = state::showTextDialog,
                 onOpenClick = onOpenClick,
                 onViewportChange = state::updateViewport,
             )

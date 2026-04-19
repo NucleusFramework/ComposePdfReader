@@ -25,6 +25,9 @@ internal expect class PdfDocument {
     /** Extract the Unicode text content of [pageIndex]. Returns empty string if the page has no text. */
     suspend fun pageText(pageIndex: Int): String
 
+    /** Extract line-level text rectangles of [pageIndex] for selection overlays. */
+    suspend fun pageTextLayout(pageIndex: Int): PageTextLayout
+
     fun close()
 }
 

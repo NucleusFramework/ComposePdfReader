@@ -1,4 +1,4 @@
-// JNI glue for PDFium. Shared between JVM desktop (compiled per-OS by build-*.sh/.bat)
+ // JNI glue for PDFium. Shared between JVM desktop (compiled per-OS by build-*.sh/.bat)
 // and Android (compiled via CMake — see src/androidMain/cpp/CMakeLists.txt).
 //
 // All functions exposed to Kotlin follow the contract of PdfiumBridge.kt.
@@ -296,6 +296,150 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nGetPageText(
         }
     }
     return env->NewStringUTF(utf8.c_str());
+}
+
+/**
+ * Count of text rectangles (line-level runs) on [page]. Opens + closes a text-page
+ * internally.
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nCountTextRects(
+        JNIEnv*, jclass, jlong page) {
+    if (page == 0) return 0;
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(p);
+    if (!tp) return 0;
+    int n = FPDFText_CountRects(tp, 0, -1);
+    FPDFText_ClosePage(tp);
+    return n;
+}
+
+/**
+ * Fill [outBoxes] with rect coordinates (4 floats per rect — left, bottom, right, top in
+ * PDF page points) and [outTexts] with the UTF-8 text for each rect. Caller supplies arrays
+ * sized for at least the count returned by [nCountTextRects]. Returns the number of rects
+ * actually written (may be less if the arrays are too small).
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nExtractTextRects(
+        JNIEnv* env, jclass, jlong page,
+        jfloatArray outBoxes, jobjectArray outTexts) {
+    if (page == 0) return 0;
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(p);
+    if (!tp) return 0;
+    int total = FPDFText_CountRects(tp, 0, -1);
+    int capacity = env->GetArrayLength(outBoxes) / 4;
+    int count = (total < capacity) ? total : capacity;
+    if (count == 0) {
+        FPDFText_ClosePage(tp);
+        return 0;
+    }
+    jfloat* boxes = env->GetFloatArrayElements(outBoxes, nullptr);
+    for (int i = 0; i < count; i++) {
+        double left = 0, top = 0, right = 0, bottom = 0;
+        FPDFText_GetRect(tp, i, &left, &top, &right, &bottom);
+        boxes[i * 4 + 0] = static_cast<float>(left);
+        boxes[i * 4 + 1] = static_cast<float>(bottom);
+        boxes[i * 4 + 2] = static_cast<float>(right);
+        boxes[i * 4 + 3] = static_cast<float>(top);
+
+        unsigned long needed = FPDFText_GetBoundedText(tp, left, top, right, bottom, nullptr, 0);
+        jstring js;
+        if (needed <= 1) {
+            js = env->NewStringUTF("");
+        } else {
+            std::u16string buf(needed, u'\0');
+            FPDFText_GetBoundedText(tp, left, top, right, bottom,
+                                    reinterpret_cast<unsigned short*>(buf.data()), needed);
+            while (!buf.empty() && buf.back() == u'\0') buf.pop_back();
+            // UTF-16 → UTF-8 (BMP + surrogate pair support).
+            std::string utf8;
+            utf8.reserve(buf.size());
+            for (size_t k = 0; k < buf.size(); ++k) {
+                char16_t c = buf[k];
+                if (c < 0x80) {
+                    utf8.push_back(static_cast<char>(c));
+                } else if (c < 0x800) {
+                    utf8.push_back(static_cast<char>(0xC0 | (c >> 6)));
+                    utf8.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                } else if (c >= 0xD800 && c <= 0xDBFF && k + 1 < buf.size()) {
+                    char16_t low = buf[k + 1];
+                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                        uint32_t cp = 0x10000 + ((c - 0xD800u) << 10) + (low - 0xDC00u);
+                        utf8.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                        utf8.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                        utf8.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                        utf8.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                        ++k;
+                        continue;
+                    }
+                    utf8.push_back(static_cast<char>(0xE0 | (c >> 12)));
+                    utf8.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+                    utf8.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                } else {
+                    utf8.push_back(static_cast<char>(0xE0 | (c >> 12)));
+                    utf8.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+                    utf8.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+                }
+            }
+            js = env->NewStringUTF(utf8.c_str());
+        }
+        env->SetObjectArrayElement(outTexts, i, js);
+        env->DeleteLocalRef(js);
+    }
+    env->ReleaseFloatArrayElements(outBoxes, boxes, 0);
+    FPDFText_ClosePage(tp);
+    return count;
+}
+
+/**
+ * Count the per-glyph characters on [page] (includes spaces and generated chars).
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nCountPageChars(
+        JNIEnv*, jclass, jlong page) {
+    if (page == 0) return 0;
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(p);
+    if (!tp) return 0;
+    int n = FPDFText_CountChars(tp);
+    FPDFText_ClosePage(tp);
+    return n;
+}
+
+/**
+ * Fill [outCodepoints] and [outBoxes] with per-character Unicode + bounding box (in PDF
+ * points, origin bottom-left). [outBoxes] is laid out as 4 floats per char: left, bottom,
+ * right, top. Returns the number of chars actually written.
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nExtractCharBoxes(
+        JNIEnv* env, jclass, jlong page,
+        jintArray outCodepoints, jfloatArray outBoxes) {
+    if (page == 0) return 0;
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(p);
+    if (!tp) return 0;
+    int total = FPDFText_CountChars(tp);
+    int capacity = env->GetArrayLength(outCodepoints);
+    int count = (total < capacity) ? total : capacity;
+    if (count == 0) { FPDFText_ClosePage(tp); return 0; }
+    jint* codepoints = env->GetIntArrayElements(outCodepoints, nullptr);
+    jfloat* boxes = env->GetFloatArrayElements(outBoxes, nullptr);
+    for (int i = 0; i < count; i++) {
+        codepoints[i] = static_cast<jint>(FPDFText_GetUnicode(tp, i));
+        double left = 0, right = 0, bottom = 0, top = 0;
+        FPDFText_GetCharBox(tp, i, &left, &right, &bottom, &top);
+        boxes[i * 4 + 0] = static_cast<float>(left);
+        boxes[i * 4 + 1] = static_cast<float>(bottom);
+        boxes[i * 4 + 2] = static_cast<float>(right);
+        boxes[i * 4 + 3] = static_cast<float>(top);
+    }
+    env->ReleaseIntArrayElements(outCodepoints, codepoints, 0);
+    env->ReleaseFloatArrayElements(outBoxes, boxes, 0);
+    FPDFText_ClosePage(tp);
+    return count;
 }
 
 } // extern "C"

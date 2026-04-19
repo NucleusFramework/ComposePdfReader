@@ -8,8 +8,15 @@ import dev.nucleusframework.pdfium.native.FPDFBitmap_Destroy
 import dev.nucleusframework.pdfium.native.FPDFBitmap_FillRect
 import dev.nucleusframework.pdfium.native.FPDFText_ClosePage
 import dev.nucleusframework.pdfium.native.FPDFText_CountChars
+import dev.nucleusframework.pdfium.native.FPDFText_CountRects
+import dev.nucleusframework.pdfium.native.FPDFText_GetBoundedText
+import dev.nucleusframework.pdfium.native.FPDFText_GetCharBox
+import dev.nucleusframework.pdfium.native.FPDFText_GetRect
 import dev.nucleusframework.pdfium.native.FPDFText_GetText
+import dev.nucleusframework.pdfium.native.FPDFText_GetUnicode
 import dev.nucleusframework.pdfium.native.FPDFText_LoadPage
+import kotlinx.cinterop.DoubleVar
+import kotlinx.cinterop.value
 import dev.nucleusframework.pdfium.native.FPDF_ANNOT
 import dev.nucleusframework.pdfium.native.FPDF_CloseDocument
 import dev.nucleusframework.pdfium.native.FPDF_ClosePage
@@ -141,6 +148,87 @@ internal actual class PdfDocument(
                     for (i in 0 until count) chars[i] = buf[i].toInt().toChar()
                     chars.concatToString().trim('\u0000')
                 }
+            } finally {
+                FPDFText_ClosePage(textPage)
+            }
+        } finally {
+            FPDF_ClosePage(page)
+        }
+    }
+
+    actual suspend fun pageTextLayout(pageIndex: Int): PageTextLayout = withContext(pdfiumDispatcher) {
+        val page = FPDF_LoadPage(handle, pageIndex) ?: return@withContext PageTextLayout.Empty
+        try {
+            val size = PageSize(
+                widthPoints = FPDF_GetPageWidthF(page),
+                heightPoints = FPDF_GetPageHeightF(page),
+            )
+            val textPage = FPDFText_LoadPage(page) ?: return@withContext PageTextLayout(
+                pageIndex, size, FloatArray(0), emptyArray(), IntArray(0), FloatArray(0),
+            )
+            try {
+                // Rect level.
+                val rectTotal = FPDFText_CountRects(textPage, 0, -1)
+                val rectBoxes: FloatArray
+                val rectTexts: Array<String>
+                if (rectTotal <= 0) {
+                    rectBoxes = FloatArray(0)
+                    rectTexts = emptyArray()
+                } else {
+                    rectBoxes = FloatArray(rectTotal * 4)
+                    rectTexts = Array(rectTotal) { "" }
+                    memScoped {
+                        val l = alloc<DoubleVar>()
+                        val t = alloc<DoubleVar>()
+                        val r = alloc<DoubleVar>()
+                        val b = alloc<DoubleVar>()
+                        for (i in 0 until rectTotal) {
+                            FPDFText_GetRect(textPage, i, l.ptr, t.ptr, r.ptr, b.ptr)
+                            rectBoxes[i * 4 + 0] = l.value.toFloat()
+                            rectBoxes[i * 4 + 1] = b.value.toFloat()
+                            rectBoxes[i * 4 + 2] = r.value.toFloat()
+                            rectBoxes[i * 4 + 3] = t.value.toFloat()
+                            val needed = FPDFText_GetBoundedText(
+                                textPage, l.value, t.value, r.value, b.value, null, 0,
+                            )
+                            if (needed > 1) {
+                                val buf = allocArray<UShortVar>(needed)
+                                FPDFText_GetBoundedText(
+                                    textPage, l.value, t.value, r.value, b.value, buf, needed,
+                                )
+                                val chars = CharArray(needed - 1)
+                                for (j in 0 until needed - 1) chars[j] = buf[j].toInt().toChar()
+                                rectTexts[i] = chars.concatToString().trim('\u0000')
+                            }
+                        }
+                    }
+                }
+                // Char level.
+                val charTotal = FPDFText_CountChars(textPage)
+                val charCodepoints: IntArray
+                val charBoxes: FloatArray
+                if (charTotal <= 0) {
+                    charCodepoints = IntArray(0)
+                    charBoxes = FloatArray(0)
+                } else {
+                    charCodepoints = IntArray(charTotal)
+                    charBoxes = FloatArray(charTotal * 4)
+                    memScoped {
+                        val l = alloc<DoubleVar>()
+                        val r = alloc<DoubleVar>()
+                        val b = alloc<DoubleVar>()
+                        val t = alloc<DoubleVar>()
+                        for (i in 0 until charTotal) {
+                            charCodepoints[i] = FPDFText_GetUnicode(textPage, i).toInt()
+                            FPDFText_GetCharBox(textPage, i, l.ptr, r.ptr, b.ptr, t.ptr)
+                            charBoxes[i * 4 + 0] = l.value.toFloat()
+                            charBoxes[i * 4 + 1] = b.value.toFloat()
+                            charBoxes[i * 4 + 2] = r.value.toFloat()
+                            charBoxes[i * 4 + 3] = t.value.toFloat()
+                        }
+                    }
+                }
+                PageTextLayout(pageIndex, size, rectBoxes, rectTexts, charCodepoints, charBoxes)
             } finally {
                 FPDFText_ClosePage(textPage)
             }

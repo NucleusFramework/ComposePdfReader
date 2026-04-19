@@ -105,6 +105,52 @@ internal actual class PdfDocument internal constructor(
         }
     }
 
+    actual suspend fun pageTextLayout(pageIndex: Int): PageTextLayout {
+        val slot = pickSlot()
+        return withContext(dispatchers[slot]) {
+            val handle = handles[slot]
+            val page = PdfiumBridge.nLoadPage(handle, pageIndex)
+            if (page == 0L) return@withContext PageTextLayout.Empty
+            try {
+                val size = PageSize(
+                    widthPoints = PdfiumBridge.nGetPageWidth(page),
+                    heightPoints = PdfiumBridge.nGetPageHeight(page),
+                )
+                // Rect level (line runs + bounded text).
+                val rectCount = PdfiumBridge.nCountTextRects(page)
+                val rectBoxes: FloatArray
+                val rectTexts: Array<String>
+                if (rectCount > 0) {
+                    val boxes = FloatArray(rectCount * 4)
+                    val texts = arrayOfNulls<String>(rectCount)
+                    val written = PdfiumBridge.nExtractTextRects(page, boxes, texts)
+                    rectTexts = Array(written) { texts[it].orEmpty() }
+                    rectBoxes = if (written == rectCount) boxes else boxes.copyOf(written * 4)
+                } else {
+                    rectBoxes = FloatArray(0)
+                    rectTexts = emptyArray()
+                }
+                // Char level (per-glyph codepoint + box).
+                val charCount = PdfiumBridge.nCountPageChars(page)
+                val charCodepoints: IntArray
+                val charBoxes: FloatArray
+                if (charCount > 0) {
+                    val cps = IntArray(charCount)
+                    val cbs = FloatArray(charCount * 4)
+                    val written = PdfiumBridge.nExtractCharBoxes(page, cps, cbs)
+                    charCodepoints = if (written == charCount) cps else cps.copyOf(written)
+                    charBoxes = if (written == charCount) cbs else cbs.copyOf(written * 4)
+                } else {
+                    charCodepoints = IntArray(0)
+                    charBoxes = FloatArray(0)
+                }
+                PageTextLayout(pageIndex, size, rectBoxes, rectTexts, charCodepoints, charBoxes)
+            } finally {
+                PdfiumBridge.nClosePage(page)
+            }
+        }
+    }
+
     actual fun close() {
         runBlocking {
             for (i in handles.indices) {

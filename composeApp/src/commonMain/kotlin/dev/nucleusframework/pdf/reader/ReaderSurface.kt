@@ -37,7 +37,6 @@ import com.composables.core.Thumb
 import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
 import dev.nucleusframework.pdf.design.AppText
-import dev.nucleusframework.pdf.design.OverlayButton
 import dev.nucleusframework.pdf.design.Spinner
 import dev.nucleusframework.pdf.design.colors
 import dev.nucleusframework.pdf.design.shapes
@@ -57,8 +56,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 internal fun ReaderSurface(
     reader: PdfReaderState,
     listState: LazyListState,
-    onCopyTextRequest: (Int) -> Unit,
-    onSelectTextRequest: (Int) -> Unit,
     onOpenClick: () -> Unit,
     onViewportChange: (IntSize) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -72,12 +69,7 @@ internal fun ReaderSurface(
         when {
             reader.isLoading && reader.pageCount == 0 -> Spinner(Modifier.align(Alignment.Center))
             reader.pageCount == 0 -> ReaderEmptyState(onOpenClick = onOpenClick)
-            else -> ContinuousReader(
-                reader = reader,
-                listState = listState,
-                onCopyTextRequest = onCopyTextRequest,
-                onSelectTextRequest = onSelectTextRequest,
-            )
+            else -> ContinuousReader(reader = reader, listState = listState)
         }
     }
 }
@@ -87,8 +79,6 @@ internal fun ReaderSurface(
 private fun ContinuousReader(
     reader: PdfReaderState,
     listState: LazyListState,
-    onCopyTextRequest: (Int) -> Unit,
-    onSelectTextRequest: (Int) -> Unit,
 ) {
     val scrollAreaState = rememberScrollAreaState(listState)
     val horizontalScroll = rememberScrollState()
@@ -125,8 +115,6 @@ private fun ContinuousReader(
                             reader = reader,
                             pageIndex = pageIndex,
                             width = pageWidth,
-                            onCopyText = { onCopyTextRequest(pageIndex) },
-                            onSelectText = { onSelectTextRequest(pageIndex) },
                         )
                     }
                 }
@@ -178,8 +166,6 @@ private fun PageCard(
     reader: PdfReaderState,
     pageIndex: Int,
     width: Dp,
-    onCopyText: () -> Unit,
-    onSelectText: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally)) {
@@ -200,14 +186,8 @@ private fun PageCard(
                 pageIndex = pageIndex,
                 modifier = Modifier.fillMaxWidth(),
                 background = Color.White,
+                selectableText = true,
             )
-            Row(
-                Modifier.align(Alignment.TopEnd).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                OverlayButton(text = "Copy text", onClick = onCopyText)
-                OverlayButton(text = "Select", onClick = onSelectText)
-            }
         }
     }
 }
