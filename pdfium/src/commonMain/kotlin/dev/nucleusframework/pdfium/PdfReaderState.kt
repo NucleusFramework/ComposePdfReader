@@ -72,54 +72,38 @@ class PdfReaderState internal constructor(
     suspend fun pageSize(pageIndex: Int): PageSize? =
         document?.pageSize(pageIndex)
 
-    /**
-     * Render (or fetch from cache) a reader-page bitmap. Returned [CachedBitmap] carries a
-     * fresh ref for the caller — **the caller must invoke [CachedBitmap.release]** exactly
-     * once when it no longer needs the bitmap (typically from a `DisposableEffect.onDispose`
-     * in the composable).
-     */
     internal suspend fun renderPage(
         pageIndex: Int,
         widthPx: Int,
         heightPx: Int,
         quality: RenderQuality = RenderQuality.FULL,
-    ): CachedBitmap? {
+    ): ImageBitmap? {
         val doc = document ?: return null
         if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
         // Only FULL renders are cached — PREVIEW is a transient low-res placeholder used to
         // bootstrap the page while the full render is in flight, and is replaced on the next
         // frame. Caching it would just double the footprint per page for no reuse.
         if (quality == RenderQuality.FULL) {
-            // Retain under the cache mutex so we can't race with eviction dropping the last ref.
-            cacheMutex.withLock { cache.get(pageIndex, widthPx)?.retain() }?.let { return it }
+            cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return it }
         }
         val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
-        val handle = rendered.wrapCached()
-        return if (quality == RenderQuality.FULL) {
-            // Caller gets its own ref; cache retains the original.
-            handle.retain()
-            cacheMutex.withLock { cache.put(pageIndex, widthPx, handle) }
-            handle
-        } else {
-            // PREVIEW is uncached → the single creator ref transfers directly to the caller.
-            handle
+        if (quality == RenderQuality.FULL) {
+            cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
         }
+        return rendered
     }
 
     /**
      * Render a page into the thumbnail cache (kept separate so sidebar scrolling doesn't
-     * evict reader-page bitmaps). Always uses [RenderQuality.PREVIEW]. Same ownership rule
-     * as [renderPage]: the caller must release the returned handle.
+     * evict reader-page bitmaps). Always uses [RenderQuality.PREVIEW].
      */
-    internal suspend fun renderThumbnail(pageIndex: Int, widthPx: Int, heightPx: Int): CachedBitmap? {
+    internal suspend fun renderThumbnail(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap? {
         val doc = document ?: return null
         if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
-        thumbCacheMutex.withLock { thumbCache.get(pageIndex, widthPx)?.retain() }?.let { return it }
+        thumbCacheMutex.withLock { thumbCache.get(pageIndex, widthPx) }?.let { return it }
         val rendered = doc.renderPage(pageIndex, widthPx, heightPx, RenderQuality.PREVIEW)
-        val handle = rendered.wrapCached()
-        handle.retain()
-        thumbCacheMutex.withLock { thumbCache.put(pageIndex, widthPx, handle) }
-        return handle
+        thumbCacheMutex.withLock { thumbCache.put(pageIndex, widthPx, rendered) }
+        return rendered
     }
 
     /** Fire-and-forget: ensure a page is in cache at the given width. Best-effort, swallows errors. */
@@ -133,13 +117,8 @@ class PdfReaderState internal constructor(
                 val ps = doc.pageSize(pageIndex)
                 val heightPx = (widthPx / ps.aspectRatio).toInt().coerceAtLeast(1)
                 val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
-                val handle = rendered.wrapCached()
                 if (quality == RenderQuality.FULL) {
-                    // Transfer the creator ref to the cache; prefetch keeps nothing.
-                    cacheMutex.withLock { cache.put(pageIndex, widthPx, handle) }
-                } else {
-                    // Not cached — no consumer either. Release immediately to free native pixels.
-                    handle.release()
+                    cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
                 }
             } catch (_: Throwable) {
                 // Prefetch is opportunistic — drop failures.

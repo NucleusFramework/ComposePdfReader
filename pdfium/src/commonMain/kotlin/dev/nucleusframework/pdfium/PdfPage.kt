@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,6 +20,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -57,20 +57,9 @@ fun PdfPage(
 ) {
     var size by remember { mutableStateOf(IntSize.Zero) }
     var pageSize by remember(pageIndex, state.pageCount) { mutableStateOf<PageSize?>(null) }
-    // `remember(pageIndex)` gives us a fresh state slot each time the page swaps. The old
-    // slot (and its CachedBitmap) becomes unreachable, so the DisposableEffect below — keyed
-    // on the same state holder — fires and releases the ref before it leaks.
-    val handleState = remember(pageIndex) { mutableStateOf<CachedBitmap?>(null) }
-    val handle = handleState.value
+    var bitmap by remember(pageIndex) { mutableStateOf<ImageBitmap?>(null) }
     var textLayout by remember(pageIndex, selectableText, state.pageCount) {
         mutableStateOf<PageTextLayout?>(null)
-    }
-
-    DisposableEffect(handleState) {
-        onDispose {
-            handleState.value?.release()
-            handleState.value = null
-        }
     }
 
     LaunchedEffect(pageIndex, state.pageCount) {
@@ -92,7 +81,7 @@ fun PdfPage(
                 val ps = pageSize ?: state.pageSize(pageIndex)?.also { pageSize = it } ?: return@collectLatest
                 val fullWidth = currentSize.width.coerceIn(1, MAX_RENDER_WIDTH)
                 val fullHeight = max(1, (fullWidth / ps.aspectRatio).roundToInt())
-                if (handleState.value == null) {
+                if (bitmap == null) {
                     val previewWidth = (fullWidth / 4).coerceAtLeast(120)
                     val previewHeight = max(1, (previewWidth / ps.aspectRatio).roundToInt())
                     val preview = state.renderPage(
@@ -101,7 +90,7 @@ fun PdfPage(
                         heightPx = previewHeight,
                         quality = RenderQuality.PREVIEW,
                     )
-                    if (preview != null) swapHandle(handleState, preview)
+                    if (preview != null) bitmap = preview
                 }
                 val full = state.renderPage(
                     pageIndex = pageIndex,
@@ -109,7 +98,7 @@ fun PdfPage(
                     heightPx = fullHeight,
                     quality = RenderQuality.FULL,
                 )
-                if (full != null) swapHandle(handleState, full)
+                if (full != null) bitmap = full
             }
     }
 
@@ -121,7 +110,7 @@ fun PdfPage(
             .onSizeChanged { size = it },
         contentAlignment = Alignment.Center,
     ) {
-        val bmp = handle?.imageBitmap
+        val bmp = bitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp,
@@ -193,17 +182,6 @@ private fun TextSelectionLayer(layout: PageTextLayout, modifier: Modifier = Modi
             )
         }
     }
-}
-
-/**
- * Atomically swap a refcounted bitmap into a state holder, releasing the old one. Keeps the
- * "exactly one release per retain" discipline even when preview→full replacement happens
- * rapidly while collectLatest restarts.
- */
-private fun swapHandle(holder: androidx.compose.runtime.MutableState<CachedBitmap?>, new: CachedBitmap) {
-    val old = holder.value
-    holder.value = new
-    old?.release()
 }
 
 private const val DEBOUNCE_MS = 100L
