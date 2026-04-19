@@ -1,4 +1,4 @@
-import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import io.github.kdroidfilter.nucleus.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
+    alias(libs.plugins.nucleus)
 }
 
 kotlin {
@@ -51,7 +52,14 @@ kotlin {
         }
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
+            implementation(libs.compose.material3)
             implementation(libs.kotlinx.coroutinesSwing)
+            // Nucleus runtime: dark-mode detection, decorated window, GraalVM bootstrap.
+            implementation(libs.nucleus.core.runtime)
+            implementation(libs.nucleus.darkmode.detector)
+            implementation(libs.nucleus.decorated.window.material3)
+            implementation(libs.nucleus.decorated.window.jni)
+            implementation(libs.nucleus.graalvm.runtime)
         }
     }
 }
@@ -87,18 +95,34 @@ dependencies {
     debugImplementation(libs.compose.uiTooling)
 }
 
-compose.desktop {
-    application {
-        mainClass = "dev.nucleusframework.pdf.MainKt"
+// Nucleus handles packaging, native distributions and GraalVM native-image.
+// It also registers the Compose desktop application block internally, so declaring our own
+// `compose.desktop.application { ... }` would duplicate the packaging tasks. Use `hotRun`
+// with `-PmainClass=...` if Compose Hot Reload needs the main class.
+nucleus.application {
+    mainClass = "dev.nucleusframework.pdf.MainKt"
 
-        nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "dev.nucleusframework.pdf"
-            packageVersion = "1.0.0"
-            // jdk.security.auth: UnixSystem — required by FileKit's XDG/DBus picker on Linux.
-            // java.management: DBus transport dependencies.
-            // jdk.unsupported: used by various native-interop helpers.
-            modules("jdk.security.auth", "java.management", "jdk.unsupported")
-        }
+    graalvm {
+        isEnabled = true
+        javaLanguageVersion = 25
+        jvmVendor = JvmVendorSpec.BELLSOFT
+        imageName = "nucleus-pdf"
+        march = providers.gradleProperty("nativeMarch").getOrElse("native")
+        buildArgs.addAll(
+            "-H:+AddAllCharsets",
+            "-Djava.awt.headless=false",
+            "-Os",
+            "-H:-IncludeMethodData",
+        )
+    }
+
+    nativeDistributions {
+        targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
+        packageName = "NucleusPdf"
+        packageVersion = "1.0.0"
+        // jdk.security.auth: UnixSystem — required by FileKit's XDG/DBus picker on Linux.
+        // java.management: DBus transport dependencies.
+        // jdk.unsupported: used by various native-interop helpers.
+        modules("jdk.security.auth", "java.management", "jdk.unsupported")
     }
 }

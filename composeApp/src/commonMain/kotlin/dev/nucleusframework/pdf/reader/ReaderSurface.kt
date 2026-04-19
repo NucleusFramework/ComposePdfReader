@@ -48,14 +48,14 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
- * Main reading area: continuous vertical scroll of pages + horizontal scroll when zoomed in,
- * with a sidebar scrollbar. Prefetches visible ±2 pages on scroll settle.
+ * Main reading area: continuous vertical scroll of pages (one per row in Single mode, two
+ * side-by-side in Double mode) + horizontal scroll when zoomed in, with a sidebar scrollbar.
+ * Prefetches visible ±2 pages on scroll settle.
  */
 @OptIn(FlowPreview::class)
 @Composable
 internal fun ReaderSurface(
-    reader: PdfReaderState,
-    listState: LazyListState,
+    state: ReaderScreenState,
     onOpenClick: () -> Unit,
     onViewportChange: (IntSize) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -63,36 +63,53 @@ internal fun ReaderSurface(
     Box(
         modifier
             .fillMaxSize()
-            .background(colors.background)
+            .background(colors.pageBackdrop)
             .onSizeChanged(onViewportChange),
     ) {
         when {
-            reader.isLoading && reader.pageCount == 0 -> Spinner(Modifier.align(Alignment.Center))
-            reader.pageCount == 0 -> ReaderEmptyState(onOpenClick = onOpenClick)
-            else -> ContinuousReader(reader = reader, listState = listState)
+            state.reader.isLoading && state.reader.pageCount == 0 -> Spinner(Modifier.align(Alignment.Center))
+            state.reader.pageCount == 0 -> ReaderEmptyState(onOpenClick = onOpenClick)
+            else -> ContinuousReader(state = state)
         }
     }
 }
 
+private val PAGE_GAP = 16.dp
+private val CONTENT_HPADDING = 24.dp
+private val CONTENT_VPADDING = 20.dp
+
 @OptIn(FlowPreview::class)
 @Composable
-private fun ContinuousReader(
-    reader: PdfReaderState,
-    listState: LazyListState,
-) {
-    val scrollAreaState = rememberScrollAreaState(listState)
+private fun ContinuousReader(state: ReaderScreenState) {
+    val reader = state.reader
+    val entries = state.spreadEntries
+    val isDouble = state.spreadMode == SpreadMode.Double
+    val scrollAreaState = rememberScrollAreaState(state.mainListState)
     val horizontalScroll = rememberScrollState()
     val density = LocalDensity.current
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val viewportWidth = maxWidth
-        val pageWidth = (viewportWidth - 48.dp).coerceAtLeast(100.dp) * reader.renderScale
-        val lazyWidth = if (pageWidth + 48.dp > viewportWidth) pageWidth + 48.dp else viewportWidth
+        // At scale=1 a single page fills the viewport (minus side padding). In double mode we
+        // fit two pages + one gap in the same space, so each page is half-width.
+        val contentSlot = (viewportWidth - CONTENT_HPADDING * 2).coerceAtLeast(120.dp)
+        val pageWidth = if (isDouble) {
+            ((contentSlot - PAGE_GAP) / 2 * reader.renderScale).coerceAtLeast(60.dp)
+        } else {
+            (contentSlot * reader.renderScale).coerceAtLeast(80.dp)
+        }
+        val rowWidth = if (isDouble) pageWidth * 2 + PAGE_GAP else pageWidth
+        val lazyWidth = if (rowWidth + CONTENT_HPADDING * 2 > viewportWidth) {
+            rowWidth + CONTENT_HPADDING * 2
+        } else {
+            viewportWidth
+        }
         val pageWidthPx = with(density) { pageWidth.roundToPx() }
 
         PrefetchOnScroll(
-            listState = listState,
+            listState = state.mainListState,
             reader = reader,
+            entries = entries,
             pageWidthPx = pageWidthPx,
         )
 
@@ -102,19 +119,20 @@ private fun ContinuousReader(
                 modifier = Modifier.width(lazyWidth).fillMaxHeight(),
             ) {
                 LazyColumn(
-                    state = listState,
+                    state = state.mainListState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(vertical = 20.dp, horizontal = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(vertical = CONTENT_VPADDING, horizontal = CONTENT_HPADDING),
+                    verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
                 ) {
                     items(
-                        items = (0 until reader.pageCount).toList(),
-                        key = { it },
-                    ) { pageIndex ->
-                        PageCard(
+                        items = entries,
+                        key = { it.first },
+                    ) { entry ->
+                        SpreadRow(
                             reader = reader,
-                            pageIndex = pageIndex,
-                            width = pageWidth,
+                            entry = entry,
+                            pageWidth = pageWidth,
+                            isDouble = isDouble,
                         )
                     }
                 }
@@ -122,8 +140,11 @@ private fun ContinuousReader(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .fillMaxHeight()
-                        .width(10.dp)
-                        .padding(vertical = 8.dp, horizontal = 2.dp),
+                        // Pull the bar ~8dp away from the window edge so Linux/Windows
+                        // invisible resize borders don't eat the hover (turns the cursor
+                        // into the resize arrow and swallows clicks on the thumb).
+                        .padding(top = 8.dp, bottom = 8.dp, end = 8.dp)
+                        .width(10.dp),
                 ) {
                     Thumb(
                         modifier = Modifier
@@ -141,24 +162,71 @@ private fun ContinuousReader(
 private fun PrefetchOnScroll(
     listState: LazyListState,
     reader: PdfReaderState,
+    entries: List<SpreadEntry>,
     pageWidthPx: Int,
 ) {
-    LaunchedEffect(listState, reader.pageCount, pageWidthPx) {
-        if (reader.pageCount == 0 || pageWidthPx == 0) return@LaunchedEffect
+    LaunchedEffect(listState, reader.pageCount, pageWidthPx, entries.size) {
+        if (entries.isEmpty() || pageWidthPx == 0) return@LaunchedEffect
         snapshotFlow {
             val info = listState.layoutInfo.visibleItemsInfo
             (info.firstOrNull()?.index ?: 0) to (info.lastOrNull()?.index ?: 0)
         }
             .distinctUntilChanged()
             .debounce(150)
-            .collect { (first, last) ->
-                val range = (first - 2).coerceAtLeast(0)..(last + 2).coerceAtMost(reader.pageCount - 1)
-                for (i in range) {
-                    if (i in first..last) continue // visible pages render themselves
-                    reader.prefetch(i, pageWidthPx.coerceAtMost(MAX_RENDER_WIDTH))
+            .collect { (firstRow, lastRow) ->
+                val prefetchStart = (firstRow - 2).coerceAtLeast(0)
+                val prefetchEnd = (lastRow + 2).coerceAtMost(entries.lastIndex)
+                for (row in prefetchStart..prefetchEnd) {
+                    if (row in firstRow..lastRow) continue // visible rows render themselves
+                    val entry = entries[row]
+                    reader.prefetch(entry.first, pageWidthPx.coerceAtMost(MAX_RENDER_WIDTH))
+                    entry.second?.let { reader.prefetch(it, pageWidthPx.coerceAtMost(MAX_RENDER_WIDTH)) }
                 }
             }
     }
+}
+
+@Composable
+private fun SpreadRow(
+    reader: PdfReaderState,
+    entry: SpreadEntry,
+    pageWidth: Dp,
+    isDouble: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (!isDouble) {
+        Column(modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally)) {
+            PageLabel(entry.first)
+            PageCard(reader = reader, pageIndex = entry.first, width = pageWidth)
+        }
+        return
+    }
+    Column(modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PAGE_GAP)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                PageLabel(entry.first)
+                PageCard(reader = reader, pageIndex = entry.first, width = pageWidth)
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (entry.second != null) {
+                    PageLabel(entry.second)
+                    PageCard(reader = reader, pageIndex = entry.second, width = pageWidth)
+                } else {
+                    // Phantom slot for odd last-page: keeps the row width stable.
+                    Box(Modifier.width(pageWidth))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageLabel(pageIndex: Int) {
+    AppText(
+        "Page ${pageIndex + 1}",
+        type.label,
+        modifier = Modifier.padding(bottom = 6.dp),
+    )
 }
 
 @Composable
@@ -168,27 +236,20 @@ private fun PageCard(
     width: Dp,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally)) {
-        AppText(
-            "Page ${pageIndex + 1}",
-            type.label,
-            modifier = Modifier.padding(bottom = 6.dp),
+    Box(
+        modifier
+            .width(width)
+            .clip(shapes.medium)
+            .border(1.dp, colors.border, shapes.medium)
+            .background(Color.White),
+    ) {
+        PdfPage(
+            state = reader,
+            pageIndex = pageIndex,
+            modifier = Modifier.fillMaxWidth(),
+            background = Color.White,
+            selectableText = true,
         )
-        Box(
-            Modifier
-                .width(width)
-                .clip(shapes.small)
-                .border(1.dp, colors.border, shapes.small)
-                .background(Color.White),
-        ) {
-            PdfPage(
-                state = reader,
-                pageIndex = pageIndex,
-                modifier = Modifier.fillMaxWidth(),
-                background = Color.White,
-                selectableText = true,
-            )
-        }
     }
 }
 

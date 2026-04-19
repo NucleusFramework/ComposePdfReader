@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -17,39 +16,69 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import dev.nucleusframework.pdf.design.AppText
 import dev.nucleusframework.pdf.design.HDivider
 import dev.nucleusframework.pdf.design.ToastOverlay
 import dev.nucleusframework.pdf.design.VDivider
 import dev.nucleusframework.pdf.design.colors
-import dev.nucleusframework.pdf.design.type
 
 /**
  * Top-level reader screen. Picks a wide or narrow layout based on the parent width,
  * renders the text-selection overlay and the transient toast. All state (file name,
  * current page, dialog, toast) lives on [state]; this composable is stateless beyond
  * what it forwards to the layout helpers.
+ *
+ * Layout stacks top-to-bottom: optional file header (mobile only) → controls bar (when
+ * a document is loaded) → sidebar + reader row. The controls bar spans the full width so
+ * the sidebar and the main reading area share a single top edge.
  */
 @Composable
 fun ReaderScreen(
     state: ReaderScreenState,
     onOpenClick: () -> Unit,
     modifier: Modifier = Modifier,
+    showFileHeader: Boolean = true,
 ) {
-    // Keep the thumbnail list scrolled to the current page.
     LaunchedEffect(state.currentPage, state.reader.pageCount) {
         val visible = state.thumbListState.layoutInfo.visibleItemsInfo.map { it.index }
         if (state.currentPage !in visible && state.reader.pageCount > 0) {
-            state.thumbListState.animateScrollToItem(state.currentPage)
+            // scrollToItem avoids composing every thumbnail between the old and new
+            // positions (long jumps could render hundreds of thumbnails otherwise).
+            state.thumbListState.scrollToItem(state.currentPage)
         }
     }
 
     Box(modifier.fillMaxSize().background(colors.background)) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            if (maxWidth >= WIDE_BREAKPOINT) {
-                WideReaderLayout(state = state, onOpenClick = onOpenClick)
-            } else {
-                NarrowReaderLayout(state = state, onOpenClick = onOpenClick)
+            val isWide = maxWidth >= WIDE_BREAKPOINT
+            val hasDocument = state.reader.pageCount > 0
+
+            Column(Modifier.fillMaxSize()) {
+                if (showFileHeader) {
+                    ReaderFileHeader(
+                        reader = state.reader,
+                        fileName = state.fileName,
+                        currentPage = state.currentPage,
+                        onOpenClick = onOpenClick,
+                    )
+                    HDivider()
+                }
+                if (hasDocument) {
+                    ReaderControlsBar(
+                        reader = state.reader,
+                        spreadMode = state.spreadMode,
+                        onToggleSpread = state::toggleSpreadMode,
+                        onFitWidth = state::fitWidth,
+                        onFitHeight = state::fitHeight,
+                        onFitPage = state::fitPage,
+                        compact = !isWide,
+                    )
+                    HDivider()
+                }
+                if (isWide) {
+                    WideBody(state = state, onOpenClick = onOpenClick, showSidebar = hasDocument)
+                } else {
+                    NarrowBody(state = state, onOpenClick = onOpenClick, showThumbStrip = hasDocument)
+                }
             }
         }
 
@@ -71,46 +100,33 @@ private val SIDEBAR_WIDTH: Dp = 176.dp
 private val THUMB_STRIP_HEIGHT: Dp = 112.dp
 
 @Composable
-private fun WideReaderLayout(
+private fun WideBody(
     state: ReaderScreenState,
     onOpenClick: () -> Unit,
+    showSidebar: Boolean,
 ) {
     Row(Modifier.fillMaxSize()) {
-        Column(
-            Modifier
-                .width(SIDEBAR_WIDTH)
-                .fillMaxHeight()
-                .background(colors.surface),
-        ) {
-            Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
-                AppText("Pages", type.label)
+        if (showSidebar) {
+            Box(
+                Modifier
+                    .width(SIDEBAR_WIDTH)
+                    .fillMaxHeight()
+                    .background(colors.surface),
+            ) {
+                ThumbnailPanel(
+                    reader = state.reader,
+                    listState = state.thumbListState,
+                    currentPage = state.currentPage,
+                    orientation = ThumbOrientation.Vertical,
+                    onPageClick = state::jumpToPage,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
-            HDivider()
-            ThumbnailPanel(
-                reader = state.reader,
-                listState = state.thumbListState,
-                currentPage = state.currentPage,
-                orientation = ThumbOrientation.Vertical,
-                onPageClick = state::jumpToPage,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-            )
+            VDivider()
         }
-        VDivider()
-        Column(Modifier.fillMaxHeight().weight(1f)) {
-            ReaderTopBar(
-                reader = state.reader,
-                fileName = state.fileName,
-                currentPage = state.currentPage,
-                onOpenClick = onOpenClick,
-                onFitWidth = state::fitWidth,
-                onFitHeight = state::fitHeight,
-                onFitPage = state::fitPage,
-                compact = false,
-            )
-            HDivider()
+        Box(Modifier.fillMaxSize()) {
             ReaderSurface(
-                reader = state.reader,
-                listState = state.mainListState,
+                state = state,
                 onOpenClick = onOpenClick,
                 onViewportChange = state::updateViewport,
             )
@@ -119,31 +135,20 @@ private fun WideReaderLayout(
 }
 
 @Composable
-private fun NarrowReaderLayout(
+private fun NarrowBody(
     state: ReaderScreenState,
     onOpenClick: () -> Unit,
+    showThumbStrip: Boolean,
 ) {
     Column(Modifier.fillMaxSize()) {
-        ReaderTopBar(
-            reader = state.reader,
-            fileName = state.fileName,
-            currentPage = state.currentPage,
-            onOpenClick = onOpenClick,
-            onFitWidth = state::fitWidth,
-            onFitHeight = state::fitHeight,
-            onFitPage = state::fitPage,
-            compact = true,
-        )
-        HDivider()
         Box(Modifier.fillMaxWidth().weight(1f)) {
             ReaderSurface(
-                reader = state.reader,
-                listState = state.mainListState,
+                state = state,
                 onOpenClick = onOpenClick,
                 onViewportChange = state::updateViewport,
             )
         }
-        if (state.reader.pageCount > 0) {
+        if (showThumbStrip) {
             HDivider()
             Box(
                 Modifier
