@@ -18,10 +18,14 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 @Stable
-class PdfReaderState internal constructor() {
+class PdfReaderState internal constructor(
+    cacheBytes: Long = DEFAULT_CACHE_BYTES,
+) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val mutex = Mutex()
+    private val openMutex = Mutex()
+    private val cacheMutex = Mutex()
+    private val cache = PdfRenderCache(cacheBytes)
     private var document: PdfDocument? = null
 
     var pageCount: Int by mutableStateOf(0)
@@ -34,14 +38,15 @@ class PdfReaderState internal constructor() {
         private set
 
     /** Render scale multiplier applied to point-sized dimensions (1f = 72dpi). */
-    var renderScale: Float by mutableStateOf(2f)
+    var renderScale: Float by mutableStateOf(1f)
 
-    suspend fun open(bytes: ByteArray, password: String? = null) = mutex.withLock {
+    suspend fun open(bytes: ByteArray, password: String? = null) = openMutex.withLock {
         isLoading = true
         error = null
         try {
             document?.close()
             document = null
+            cacheMutex.withLock { cache.clear() }
             val doc = openPdfDocument(bytes, password)
             document = doc
             pageCount = doc.pageCount
@@ -61,7 +66,28 @@ class PdfReaderState internal constructor() {
     internal suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap? {
         val doc = document ?: return null
         if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
-        return doc.renderPage(pageIndex, widthPx, heightPx)
+        cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return it }
+        val rendered = doc.renderPage(pageIndex, widthPx, heightPx)
+        cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+        return rendered
+    }
+
+    /** Fire-and-forget: ensure a page is in cache at the given width. Best-effort, swallows errors. */
+    fun prefetch(pageIndex: Int, widthPx: Int) {
+        if (widthPx <= 0) return
+        scope.launch {
+            val doc = document ?: return@launch
+            if (pageIndex !in 0 until pageCount) return@launch
+            cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return@launch }
+            try {
+                val ps = doc.pageSize(pageIndex)
+                val heightPx = (widthPx / ps.aspectRatio).toInt().coerceAtLeast(1)
+                val rendered = doc.renderPage(pageIndex, widthPx, heightPx)
+                cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+            } catch (_: Throwable) {
+                // Prefetch is opportunistic — drop failures.
+            }
+        }
     }
 
     suspend fun pageText(pageIndex: Int): String {
@@ -72,19 +98,25 @@ class PdfReaderState internal constructor() {
 
     fun dispose() {
         scope.launch {
-            mutex.withLock {
+            openMutex.withLock {
                 document?.close()
                 document = null
+                cacheMutex.withLock { cache.clear() }
             }
         }.invokeOnCompletion { scope.cancel() }
     }
 
     internal fun launchOnScope(block: suspend CoroutineScope.() -> Unit): Job = scope.launch(block = block)
+
+    companion object {
+        /** 150 MB default cache budget — tune via the [rememberPdfReaderState] overload. */
+        const val DEFAULT_CACHE_BYTES: Long = 150L * 1024 * 1024
+    }
 }
 
 @Composable
-fun rememberPdfReaderState(): PdfReaderState {
-    val state = remember { PdfReaderState() }
+fun rememberPdfReaderState(cacheBytes: Long = PdfReaderState.DEFAULT_CACHE_BYTES): PdfReaderState {
+    val state = remember(cacheBytes) { PdfReaderState(cacheBytes) }
     DisposableEffect(state) {
         onDispose { state.dispose() }
     }

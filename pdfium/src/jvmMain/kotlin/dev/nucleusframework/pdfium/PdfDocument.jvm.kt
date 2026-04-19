@@ -25,6 +25,11 @@ import org.jetbrains.skia.ImageInfo
 internal actual class PdfDocument(
     private val handle: Long,
 ) {
+    // Per-document single-threaded dispatcher: docs render in parallel, ops within a doc are serialized.
+    private val dispatcherPair = Pdfium.newDispatcher()
+    private val dispatcher = dispatcherPair.first
+    private val executor = dispatcherPair.second
+
     actual val pageCount: Int = PdfiumBridge.nGetPageCount(handle)
     actual val metadata: PdfMetadata = PdfMetadata(
         title = PdfiumBridge.nGetMeta(handle, "Title"),
@@ -35,7 +40,7 @@ internal actual class PdfDocument(
         producer = PdfiumBridge.nGetMeta(handle, "Producer"),
     )
 
-    actual suspend fun pageSize(pageIndex: Int): PageSize = withContext(Pdfium.dispatcher) {
+    actual suspend fun pageSize(pageIndex: Int): PageSize = withContext(dispatcher) {
         val page = PdfiumBridge.nLoadPage(handle, pageIndex)
         if (page == 0L) return@withContext PageSize(0f, 0f)
         try {
@@ -49,7 +54,7 @@ internal actual class PdfDocument(
     }
 
     actual suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap =
-        withContext(Pdfium.dispatcher) {
+        withContext(dispatcher) {
             // N32 on little-endian = BGRA — PDFium writes BGRA natively, no byte-swap needed.
             val info = ImageInfo.makeN32(widthPx, heightPx, ColorAlphaType.PREMUL)
             val bitmap = Bitmap().apply { allocPixels(info) }
@@ -73,7 +78,7 @@ internal actual class PdfDocument(
             bitmap.asComposeImageBitmap()
         }
 
-    actual suspend fun pageText(pageIndex: Int): String = withContext(Pdfium.dispatcher) {
+    actual suspend fun pageText(pageIndex: Int): String = withContext(dispatcher) {
         val page = PdfiumBridge.nLoadPage(handle, pageIndex)
         if (page == 0L) return@withContext ""
         try {
@@ -84,14 +89,18 @@ internal actual class PdfDocument(
     }
 
     actual fun close() {
-        runBlocking(Pdfium.dispatcher) {
+        runBlocking(dispatcher) {
             PdfiumBridge.nCloseDocument(handle)
         }
+        executor.shutdown()
     }
 }
 
 internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?): PdfDocument =
-    withContext(Pdfium.dispatcher) {
+    withContext(Pdfium.sharedDispatcher) {
+        // Opening runs on the shared dispatcher to keep PDFium's library init + doc load
+        // race-free. Subsequent ops flow through the document's own dispatcher so each
+        // doc renders independently.
         val handle = PdfiumBridge.nOpenDocument(bytes, password)
         if (handle == 0L) {
             error("PDFium refused to open document (err=${PdfiumBridge.nGetLastError()})")

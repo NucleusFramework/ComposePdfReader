@@ -19,6 +19,10 @@ import kotlinx.coroutines.withContext
 internal actual class PdfDocument(
     private val handle: Long,
 ) {
+    private val dispatcherPair = Pdfium.newDispatcher()
+    private val dispatcher = dispatcherPair.first
+    private val executor = dispatcherPair.second
+
     actual val pageCount: Int = PdfiumBridge.nGetPageCount(handle)
     actual val metadata: PdfMetadata = PdfMetadata(
         title = PdfiumBridge.nGetMeta(handle, "Title"),
@@ -29,7 +33,7 @@ internal actual class PdfDocument(
         producer = PdfiumBridge.nGetMeta(handle, "Producer"),
     )
 
-    actual suspend fun pageSize(pageIndex: Int): PageSize = withContext(Pdfium.dispatcher) {
+    actual suspend fun pageSize(pageIndex: Int): PageSize = withContext(dispatcher) {
         val page = PdfiumBridge.nLoadPage(handle, pageIndex)
         if (page == 0L) return@withContext PageSize(0f, 0f)
         try {
@@ -43,7 +47,7 @@ internal actual class PdfDocument(
     }
 
     actual suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap =
-        withContext(Pdfium.dispatcher) {
+        withContext(dispatcher) {
             val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
             check(page != 0L) { "PDFium failed to load page $pageIndex (err=${PdfiumBridge.nGetLastError()})" }
@@ -56,7 +60,7 @@ internal actual class PdfDocument(
             bitmap.asImageBitmap()
         }
 
-    actual suspend fun pageText(pageIndex: Int): String = withContext(Pdfium.dispatcher) {
+    actual suspend fun pageText(pageIndex: Int): String = withContext(dispatcher) {
         val page = PdfiumBridge.nLoadPage(handle, pageIndex)
         if (page == 0L) return@withContext ""
         try {
@@ -67,14 +71,15 @@ internal actual class PdfDocument(
     }
 
     actual fun close() {
-        runBlocking(Pdfium.dispatcher) {
+        runBlocking(dispatcher) {
             PdfiumBridge.nCloseDocument(handle)
         }
+        executor.shutdown()
     }
 }
 
 internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?): PdfDocument =
-    withContext(Pdfium.dispatcher) {
+    withContext(Pdfium.sharedDispatcher) {
         val handle = PdfiumBridge.nOpenDocument(bytes, password)
         if (handle == 0L) {
             error("PDFium refused to open document (err=${PdfiumBridge.nGetLastError()})")

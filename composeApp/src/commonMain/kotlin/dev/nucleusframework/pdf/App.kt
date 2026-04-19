@@ -65,6 +65,9 @@ import io.github.vinceglb.filekit.dialogs.FileKitType
 import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
 import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -248,16 +251,38 @@ private fun EmptyState(onOpen: () -> Unit) {
 
 // ----- Scrolling reader with proper scrollbar -----
 
+@OptIn(FlowPreview::class)
 @Composable
 private fun ScrollingReader(reader: PdfReaderState) {
     val listState = rememberLazyListState()
     val scrollAreaState = rememberScrollAreaState(listState)
     val horizontalScroll = rememberScrollState()
+    val density = androidx.compose.ui.platform.LocalDensity.current
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val viewportWidth = maxWidth
         val pageWidth = (viewportWidth - 24.dp).coerceAtLeast(0.dp) * reader.renderScale
         val lazyWidth = if (pageWidth > viewportWidth) pageWidth + 24.dp else viewportWidth
+        val pageWidthPx = with(density) { pageWidth.roundToPx() }
+
+        // Prefetch pages just-off-screen (±2) so scroll rarely shows a blank placeholder.
+        // Debounce so the hook only fires once the scroll settles.
+        LaunchedEffect(listState, reader.pageCount, pageWidthPx) {
+            if (reader.pageCount == 0 || pageWidthPx == 0) return@LaunchedEffect
+            androidx.compose.runtime.snapshotFlow {
+                val info = listState.layoutInfo.visibleItemsInfo
+                (info.firstOrNull()?.index ?: 0) to (info.lastOrNull()?.index ?: 0)
+            }
+                .distinctUntilChanged()
+                .debounce(150)
+                .collect { (first, last) ->
+                    val range = (first - 2).coerceAtLeast(0)..(last + 2).coerceAtMost(reader.pageCount - 1)
+                    for (i in range) {
+                        if (i in first..last) continue // visible pages render themselves
+                        reader.prefetch(i, pageWidthPx.coerceAtMost(4096))
+                    }
+                }
+        }
 
         Box(
             Modifier

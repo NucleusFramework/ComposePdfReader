@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -20,14 +21,21 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 
 /**
- * Renders a PDF page. The composable sizes itself via the [modifier] (pass a width constraint
- * to control how big the page is on screen) and renders a bitmap at roughly 2× its pixel size
- * for crisp output at the current zoom level. Changing [PdfReaderState.renderScale] by itself
- * does NOT resize the page — the caller is expected to multiply the modifier's width by scale
- * if a visual zoom effect is desired.
+ * Render a PDF page with a progressive two-tier strategy:
+ *   1. On first composition, a low-resolution "preview" bitmap renders quickly and shows.
+ *   2. A full-resolution bitmap renders in the background and replaces the preview.
+ *
+ * Size changes (zoom, container resize) are debounced to avoid thrashing during drag.
+ * `collectLatest` cancels an in-flight full-quality render when the target size changes.
  */
+@OptIn(FlowPreview::class)
 @Composable
 fun PdfPage(
     state: PdfReaderState,
@@ -44,13 +52,30 @@ fun PdfPage(
         pageSize = state.pageSize(pageIndex)
     }
 
-    LaunchedEffect(pageIndex, size, state.pageCount) {
-        val ps = pageSize ?: state.pageSize(pageIndex)?.also { pageSize = it } ?: return@LaunchedEffect
-        if (size.width == 0 || size.height == 0) return@LaunchedEffect
-        val renderWidth = (size.width * DPI_MULTIPLIER).roundToInt().coerceIn(1, MAX_RENDER_WIDTH)
-        val renderHeight = max(1, (renderWidth / ps.aspectRatio).roundToInt())
-        val rendered = state.renderPage(pageIndex, renderWidth, renderHeight)
-        if (rendered != null) bitmap = rendered
+    LaunchedEffect(pageIndex, state.pageCount) {
+        snapshotFlow { size }
+            .filter { it.width > 0 && it.height > 0 }
+            .distinctUntilChanged()
+            .debounce(DEBOUNCE_MS)
+            .collectLatest { currentSize ->
+                val ps = pageSize ?: state.pageSize(pageIndex)?.also { pageSize = it } ?: return@collectLatest
+                // IntSize is in physical pixels — 1:1 with device pixels on Desktop/Android/iOS.
+                val fullWidth = currentSize.width.coerceIn(1, MAX_RENDER_WIDTH)
+                val fullHeight = max(1, (fullWidth / ps.aspectRatio).roundToInt())
+
+                // Preview tier: only on first bitmap for this page. Subsequent zoom keeps the
+                // old bitmap visible (stretched) until the full render lands — smoother UX.
+                if (bitmap == null) {
+                    val previewWidth = (fullWidth / 4).coerceAtLeast(120)
+                    val previewHeight = max(1, (previewWidth / ps.aspectRatio).roundToInt())
+                    val preview = state.renderPage(pageIndex, previewWidth, previewHeight)
+                    if (preview != null) bitmap = preview
+                }
+
+                // Full tier: crisp final version.
+                val full = state.renderPage(pageIndex, fullWidth, fullHeight)
+                if (full != null) bitmap = full
+            }
     }
 
     val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT
@@ -73,6 +98,6 @@ fun PdfPage(
     }
 }
 
-private const val DPI_MULTIPLIER = 1.5f
+private const val DEBOUNCE_MS = 100L
 private const val MAX_RENDER_WIDTH = 4096
 private const val DEFAULT_ASPECT = 595f / 842f // A4 portrait
