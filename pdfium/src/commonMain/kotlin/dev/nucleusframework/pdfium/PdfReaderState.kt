@@ -60,7 +60,8 @@ class PdfReaderState internal constructor(
         }
     }
 
-    internal suspend fun pageSize(pageIndex: Int): PageSize? =
+    /** Page dimensions in points, or null if the document isn't open or the index is out of range. */
+    suspend fun pageSize(pageIndex: Int): PageSize? =
         document?.pageSize(pageIndex)
 
     internal suspend fun renderPage(
