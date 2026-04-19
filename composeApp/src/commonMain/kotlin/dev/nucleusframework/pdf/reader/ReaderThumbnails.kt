@@ -100,13 +100,13 @@ private fun VerticalThumbnailPanel(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .fillMaxHeight()
-                .width(8.dp)
-                .padding(vertical = 6.dp, horizontal = 2.dp),
+                .padding(vertical = 8.dp, horizontal = 2.dp)
+                .width(10.dp),
         ) {
             Thumb(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(colors.border),
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(colors.muted.copy(alpha = 0.6f)),
             )
         }
     }

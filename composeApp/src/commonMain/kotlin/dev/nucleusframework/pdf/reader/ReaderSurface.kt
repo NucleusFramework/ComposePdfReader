@@ -149,7 +149,7 @@ private fun ContinuousReader(state: ReaderScreenState) {
                     Thumb(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(colors.border),
+                            .background(colors.muted.copy(alpha = 0.6f)),
                     )
                 }
             }
