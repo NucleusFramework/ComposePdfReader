@@ -407,12 +407,12 @@ val buildJniMacOs = tasks.register<Exec>("buildJniMacOs") {
 
 val buildJniWindows = tasks.register<Exec>("buildJniWindows") {
     group = "pdfium"
-    description = "Compile the JNI glue for Windows x64. Run inside an `x64 Native Tools` prompt (vcvarsall x64)."
+    description = "Compile the JNI glue for Windows x64. Auto-detects MSVC via vswhere if not on PATH."
     onlyIf { Os.isFamily(Os.FAMILY_WINDOWS) }
     dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
     val scriptDir = layout.projectDirectory.dir("src/jvmMain/native")
     workingDir(scriptDir)
-    commandLine("cmd", "/c", scriptDir.file("build-windows.bat").asFile.absolutePath)
+    commandLine("cmd", "/c", scriptDir.file("build-windows.bat").asFile.absolutePath, "x64")
     environment("PDFIUM_INCLUDE", stagedHeadersDir.get().asFile.absolutePath)
     environment("PDFIUM_LIB", nativeJniResourceDir.dir("win32-x86-64").asFile.absolutePath)
     environment("OUT_DIR", nativeJniResourceDir.dir("win32-x86-64").asFile.absolutePath)
@@ -420,12 +420,16 @@ val buildJniWindows = tasks.register<Exec>("buildJniWindows") {
 
 val buildJniWindowsArm = tasks.register<Exec>("buildJniWindowsArm") {
     group = "pdfium"
-    description = "Compile the JNI glue for Windows arm64. Run inside an `arm64 Native Tools` prompt (vcvarsall arm64)."
-    onlyIf { Os.isFamily(Os.FAMILY_WINDOWS) }
+    description = "Compile the JNI glue for Windows arm64. Requires the MSVC ARM64 cross-compiler. Opt in with -Ppdfium.buildWinArm=true."
+    onlyIf {
+        Os.isFamily(Os.FAMILY_WINDOWS) &&
+            (providers.gradleProperty("pdfium.buildWinArm").orNull == "true" ||
+                System.getProperty("os.arch").equals("aarch64", ignoreCase = true))
+    }
     dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
     val scriptDir = layout.projectDirectory.dir("src/jvmMain/native")
     workingDir(scriptDir)
-    commandLine("cmd", "/c", scriptDir.file("build-windows.bat").asFile.absolutePath)
+    commandLine("cmd", "/c", scriptDir.file("build-windows.bat").asFile.absolutePath, "arm64")
     environment("PDFIUM_INCLUDE", stagedHeadersDir.get().asFile.absolutePath)
     environment("PDFIUM_LIB", nativeJniResourceDir.dir("win32-arm64").asFile.absolutePath)
     environment("OUT_DIR", nativeJniResourceDir.dir("win32-arm64").asFile.absolutePath)
