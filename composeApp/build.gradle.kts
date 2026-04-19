@@ -121,7 +121,7 @@ nucleus.application {
     nativeDistributions {
         cleanupNativeLibs = true
         compressionLevel = CompressionLevel.Maximum
-        targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
+        targetFormats(TargetFormat.Dmg, TargetFormat.Nsis, TargetFormat.Deb, TargetFormat.AppImage)
         packageName = "NucleusPdf"
         packageVersion = "1.0.0"
         homepage = "https://github.com/nucleusframework/nucleus-pdf"

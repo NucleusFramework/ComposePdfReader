@@ -421,11 +421,9 @@ val buildJniWindows = tasks.register<Exec>("buildJniWindows") {
 val buildJniWindowsArm = tasks.register<Exec>("buildJniWindowsArm") {
     group = "pdfium"
     description = "Compile the JNI glue for Windows arm64. Requires the MSVC ARM64 cross-compiler. Opt in with -Ppdfium.buildWinArm=true."
-    onlyIf {
-        Os.isFamily(Os.FAMILY_WINDOWS) &&
-            (providers.gradleProperty("pdfium.buildWinArm").orNull == "true" ||
-                System.getProperty("os.arch").equals("aarch64", ignoreCase = true))
-    }
+    val buildWinArm = providers.gradleProperty("pdfium.buildWinArm").orNull == "true" ||
+        System.getProperty("os.arch").equals("aarch64", ignoreCase = true)
+    onlyIf { Os.isFamily(Os.FAMILY_WINDOWS) && buildWinArm }
     dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
     val scriptDir = layout.projectDirectory.dir("src/jvmMain/native")
     workingDir(scriptDir)
