@@ -2,8 +2,12 @@ package dev.nucleusframework.pdfium
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asComposeImageBitmap
+import dev.nucleusframework.pdfium.jvm.FPDF_ANNOT
 import dev.nucleusframework.pdfium.jvm.Pdfium
 import dev.nucleusframework.pdfium.jvm.PdfiumBridge
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Bitmap
@@ -11,65 +15,73 @@ import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ImageInfo
 
 /**
- * JVM PDF document backed by PDFium + Skia.
+ * JVM PDF document backed by a **pool** of PDFium document handles. All handles reference
+ * the **same** native byte buffer (one allocation, shared across the pool) but each has its
+ * own dispatcher/thread, so renders for different pages run in parallel across CPU cores.
  *
- * Rendering is **zero-copy**: PDFium writes its BGRA output directly into the Skia Bitmap's
- * native pixel memory via a raw pointer obtained from `Bitmap.peekPixels().addr`. No
- * intermediate ByteBuffer, no ByteArray, no `Bitmap.installPixels(ByteArray)` copy.
- *
- * Bitmap's pixel memory is Skia-managed — its lifetime is tied to the Kotlin `Bitmap`
- * instance, so when Compose drops the resulting ImageBitmap, GC eventually reclaims the
- * bitmap and Skia frees the pixels. Peak RAM is therefore bounded by the number of
- * bitmaps Compose keeps alive (typically just the visible pages).
+ * Rendering is still zero-copy: PDFium writes BGRA directly into each Skia Bitmap's pixel
+ * memory (`peekPixels().addr`).
  */
-internal actual class PdfDocument(
-    private val handle: Long,
+internal actual class PdfDocument internal constructor(
+    private val bufferAddr: Long,
+    private val bufferSize: Int,
+    private val handles: LongArray,
+    private val dispatchers: Array<CoroutineDispatcher>,
+    private val executors: Array<ExecutorService>,
 ) {
-    // Per-document single-threaded dispatcher: docs render in parallel, ops within a doc are serialized.
-    private val dispatcherPair = Pdfium.newDispatcher()
-    private val dispatcher = dispatcherPair.first
-    private val executor = dispatcherPair.second
-
-    actual val pageCount: Int = PdfiumBridge.nGetPageCount(handle)
+    actual val pageCount: Int = PdfiumBridge.nGetPageCount(handles[0])
     actual val metadata: PdfMetadata = PdfMetadata(
-        title = PdfiumBridge.nGetMeta(handle, "Title"),
-        author = PdfiumBridge.nGetMeta(handle, "Author"),
-        subject = PdfiumBridge.nGetMeta(handle, "Subject"),
-        keywords = PdfiumBridge.nGetMeta(handle, "Keywords"),
-        creator = PdfiumBridge.nGetMeta(handle, "Creator"),
-        producer = PdfiumBridge.nGetMeta(handle, "Producer"),
+        title = PdfiumBridge.nGetMeta(handles[0], "Title"),
+        author = PdfiumBridge.nGetMeta(handles[0], "Author"),
+        subject = PdfiumBridge.nGetMeta(handles[0], "Subject"),
+        keywords = PdfiumBridge.nGetMeta(handles[0], "Keywords"),
+        creator = PdfiumBridge.nGetMeta(handles[0], "Creator"),
+        producer = PdfiumBridge.nGetMeta(handles[0], "Producer"),
     )
 
-    actual suspend fun pageSize(pageIndex: Int): PageSize = withContext(dispatcher) {
-        val page = PdfiumBridge.nLoadPage(handle, pageIndex)
-        if (page == 0L) return@withContext PageSize(0f, 0f)
-        try {
-            PageSize(
-                widthPoints = PdfiumBridge.nGetPageWidth(page),
-                heightPoints = PdfiumBridge.nGetPageHeight(page),
-            )
-        } finally {
-            PdfiumBridge.nClosePage(page)
+    private val nextSlot = AtomicInteger(0)
+    private fun pickSlot(): Int = (nextSlot.getAndIncrement() and Int.MAX_VALUE) % handles.size
+
+    actual suspend fun pageSize(pageIndex: Int): PageSize {
+        val slot = pickSlot()
+        return withContext(dispatchers[slot]) {
+            val handle = handles[slot]
+            val page = PdfiumBridge.nLoadPage(handle, pageIndex)
+            if (page == 0L) return@withContext PageSize(0f, 0f)
+            try {
+                PageSize(
+                    widthPoints = PdfiumBridge.nGetPageWidth(page),
+                    heightPoints = PdfiumBridge.nGetPageHeight(page),
+                )
+            } finally {
+                PdfiumBridge.nClosePage(page)
+            }
         }
     }
 
-    actual suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap =
-        withContext(dispatcher) {
-            // N32 on little-endian = BGRA — PDFium writes BGRA natively, no byte-swap needed.
+    actual suspend fun renderPage(
+        pageIndex: Int,
+        widthPx: Int,
+        heightPx: Int,
+        quality: RenderQuality,
+    ): ImageBitmap {
+        val slot = pickSlot()
+        return withContext(dispatchers[slot]) {
+            val handle = handles[slot]
             val info = ImageInfo.makeN32(widthPx, heightPx, ColorAlphaType.PREMUL)
             val bitmap = Bitmap().apply { allocPixels(info) }
             val pixmap = bitmap.peekPixels()
-                ?: error("Skia peekPixels returned null (bitmap not backed by contiguous memory?)")
-            val pixelsAddr = pixmap.addr
+                ?: error("Skia peekPixels returned null")
+            val addr = pixmap.addr
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
-            check(page != 0L) { "PDFium failed to load page $pageIndex (err=${PdfiumBridge.nGetLastError()})" }
+            check(page != 0L) { "PDFium load page $pageIndex failed (err=${PdfiumBridge.nGetLastError()})" }
             try {
                 val ok = PdfiumBridge.nRenderPageToAddress(
                     page = page,
-                    address = pixelsAddr,
+                    address = addr,
                     width = widthPx,
                     height = heightPx,
-                    swapRedBlue = false,
+                    flags = quality.toFlags(),
                 )
                 check(ok) { "PDFium render failed (err=${PdfiumBridge.nGetLastError()})" }
             } finally {
@@ -77,33 +89,69 @@ internal actual class PdfDocument(
             }
             bitmap.asComposeImageBitmap()
         }
+    }
 
-    actual suspend fun pageText(pageIndex: Int): String = withContext(dispatcher) {
-        val page = PdfiumBridge.nLoadPage(handle, pageIndex)
-        if (page == 0L) return@withContext ""
-        try {
-            PdfiumBridge.nGetPageText(page).orEmpty()
-        } finally {
-            PdfiumBridge.nClosePage(page)
+    actual suspend fun pageText(pageIndex: Int): String {
+        val slot = pickSlot()
+        return withContext(dispatchers[slot]) {
+            val handle = handles[slot]
+            val page = PdfiumBridge.nLoadPage(handle, pageIndex)
+            if (page == 0L) return@withContext ""
+            try {
+                PdfiumBridge.nGetPageText(page).orEmpty()
+            } finally {
+                PdfiumBridge.nClosePage(page)
+            }
         }
     }
 
     actual fun close() {
-        runBlocking(dispatcher) {
-            PdfiumBridge.nCloseDocument(handle)
+        runBlocking {
+            for (i in handles.indices) {
+                withContext(dispatchers[i]) {
+                    PdfiumBridge.nCloseDocument(handles[i])
+                }
+            }
         }
-        executor.shutdown()
+        PdfiumBridge.nFreeBuffer(bufferAddr)
+        executors.forEach { it.shutdown() }
+    }
+
+    private fun RenderQuality.toFlags(): Int = when (this) {
+        RenderQuality.PREVIEW -> 0
+        RenderQuality.FULL -> FPDF_ANNOT
     }
 }
 
+// PDFium internally uses FreeType's `FT_Library`, a global singleton which FreeType explicitly
+// documents as "not thread-safe". Two threads rendering any page that touches fonts will
+// corrupt FreeType's heap → SIGSEGV in libfreetype. So even with distinct FPDF_DOCUMENT
+// handles, we cannot parallelize. POOL_SIZE stays at 1; Chromium works around this by
+// running PDFium in a separate process, which we can't do from the JVM without major work.
+private const val POOL_SIZE: Int = 1
+
 internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?): PdfDocument =
     withContext(Pdfium.sharedDispatcher) {
-        // Opening runs on the shared dispatcher to keep PDFium's library init + doc load
-        // race-free. Subsequent ops flow through the document's own dispatcher so each
-        // doc renders independently.
-        val handle = PdfiumBridge.nOpenDocument(bytes, password)
-        if (handle == 0L) {
-            error("PDFium refused to open document (err=${PdfiumBridge.nGetLastError()})")
+        val bufferAddr = PdfiumBridge.nAllocBuffer(bytes)
+        if (bufferAddr == 0L) error("Failed to allocate native PDF buffer")
+        try {
+            val handles = LongArray(POOL_SIZE)
+            for (i in 0 until POOL_SIZE) {
+                val h = PdfiumBridge.nOpenDocumentFromMemory(bufferAddr, bytes.size.toLong(), password)
+                if (h == 0L) {
+                    // Cleanup previously opened handles + buffer on failure.
+                    for (j in 0 until i) PdfiumBridge.nCloseDocument(handles[j])
+                    PdfiumBridge.nFreeBuffer(bufferAddr)
+                    error("PDFium refused to open document (err=${PdfiumBridge.nGetLastError()})")
+                }
+                handles[i] = h
+            }
+            val pairs = Array(POOL_SIZE) { Pdfium.newDispatcher() }
+            val dispatchers = Array(POOL_SIZE) { pairs[it].first }
+            val executors = Array(POOL_SIZE) { pairs[it].second }
+            PdfDocument(bufferAddr, bytes.size, handles, dispatchers, executors)
+        } catch (t: Throwable) {
+            PdfiumBridge.nFreeBuffer(bufferAddr)
+            throw t
         }
-        PdfDocument(handle)
     }

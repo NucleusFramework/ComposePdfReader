@@ -68,12 +68,22 @@ fun PdfPage(
                 if (bitmap == null) {
                     val previewWidth = (fullWidth / 4).coerceAtLeast(120)
                     val previewHeight = max(1, (previewWidth / ps.aspectRatio).roundToInt())
-                    val preview = state.renderPage(pageIndex, previewWidth, previewHeight)
+                    val preview = state.renderPage(
+                        pageIndex = pageIndex,
+                        widthPx = previewWidth,
+                        heightPx = previewHeight,
+                        quality = RenderQuality.PREVIEW,
+                    )
                     if (preview != null) bitmap = preview
                 }
 
-                // Full tier: crisp final version.
-                val full = state.renderPage(pageIndex, fullWidth, fullHeight)
+                // Full tier: annotations on, LCD text off (matches app perf target).
+                val full = state.renderPage(
+                    pageIndex = pageIndex,
+                    widthPx = fullWidth,
+                    heightPx = fullHeight,
+                    quality = RenderQuality.FULL,
+                )
                 if (full != null) bitmap = full
             }
     }

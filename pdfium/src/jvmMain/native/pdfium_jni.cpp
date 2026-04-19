@@ -180,29 +180,66 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPage(
 }
 
 /**
- * Render [page] directly into an externally-owned memory region pointed at by [address].
- * Layout: BGRA, stride = width*4. The caller owns the memory; we only write. Used on JVM
- * to render straight into a Skia Bitmap's pixel memory (obtained via peekPixels().addr) —
- * zero intermediate copies.
+ * Render [page] directly into an externally-owned memory region at [address].
+ * Layout: BGRA, stride = width*4. Caller owns the memory; we only write.
+ * [flags] is a bitmask from fpdfview.h (FPDF_ANNOT, FPDF_LCD_TEXT, FPDF_REVERSE_BYTE_ORDER, …).
+ * Passing 0 yields the fastest render (draft quality).
  */
 JNIEXPORT jboolean JNICALL
 Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToAddress(
         JNIEnv*, jclass, jlong page, jlong address,
-        jint width, jint height, jboolean swapRedBlue) {
+        jint width, jint height, jint flags) {
     if (page == 0 || address == 0) return JNI_FALSE;
     void* buffer = reinterpret_cast<void*>(address);
     const int stride = width * 4;
-    // PDFium renders atop existing content — pre-fill white.
     std::memset(buffer, 0xFF, static_cast<size_t>(stride) * static_cast<size_t>(height));
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, buffer, stride);
     if (!bmp) return JNI_FALSE;
     FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xFFFFFFFF);
-    int flags = FPDF_ANNOT | FPDF_LCD_TEXT;
-    if (swapRedBlue) flags |= FPDF_REVERSE_BYTE_ORDER;
     FPDF_RenderPageBitmap(bmp, reinterpret_cast<FPDF_PAGE>(page),
                           0, 0, width, height, 0, flags);
     FPDFBitmap_Destroy(bmp);
     return JNI_TRUE;
+}
+
+/**
+ * Allocate a native buffer and copy the Java byte array into it. Returns a raw pointer
+ * that can be passed to [nOpenDocumentFromMemory] — the pointer must outlive every
+ * document opened against it, and must eventually be freed via [nFreeBuffer].
+ *
+ * The pool opens N document handles against the same buffer: N× handles, 1× memory.
+ */
+JNIEXPORT jlong JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nAllocBuffer(
+        JNIEnv* env, jclass, jbyteArray data) {
+    jsize size = env->GetArrayLength(data);
+    auto* buf = new uint8_t[static_cast<size_t>(size)];
+    env->GetByteArrayRegion(data, 0, size, reinterpret_cast<jbyte*>(buf));
+    return reinterpret_cast<jlong>(buf);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nFreeBuffer(
+        JNIEnv*, jclass, jlong address) {
+    if (address == 0) return;
+    delete[] reinterpret_cast<uint8_t*>(address);
+}
+
+/**
+ * Open a document from a pre-allocated native buffer. PDFium keeps a pointer to [address]
+ * for the document's lifetime — caller must keep the memory alive until [nCloseDocument].
+ * Unlike [nOpenDocument], no internal copy is made.
+ */
+JNIEXPORT jlong JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nOpenDocumentFromMemory(
+        JNIEnv* env, jclass, jlong address, jlong size, jstring password) {
+    ensureInit();
+    const char* pwd = nullptr;
+    if (password != nullptr) pwd = env->GetStringUTFChars(password, nullptr);
+    FPDF_DOCUMENT doc = FPDF_LoadMemDocument64(
+        reinterpret_cast<void*>(address), static_cast<size_t>(size), pwd);
+    if (pwd != nullptr) env->ReleaseStringUTFChars(password, pwd);
+    return reinterpret_cast<jlong>(doc);
 }
 
 /**

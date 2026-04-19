@@ -28,13 +28,25 @@ internal object PdfiumBridge {
         height: Int,
         swapRedBlue: Boolean,
     ): Boolean
-    /** Zero-copy render: writes directly at [address]. Used with `Bitmap.peekPixels().addr`. */
+    /** Zero-copy render: writes directly at [address]. Flags = `FPDF_ANNOT | FPDF_LCD_TEXT | …`. */
     @JvmStatic external fun nRenderPageToAddress(
         page: Long,
         address: Long,
         width: Int,
         height: Int,
-        swapRedBlue: Boolean,
+        flags: Int,
     ): Boolean
     @JvmStatic external fun nGetPageText(page: Long): String?
+
+    // Shared-buffer document pool support:
+    /** Allocate a native buffer holding [data]. Returns a raw pointer; free with [nFreeBuffer]. */
+    @JvmStatic external fun nAllocBuffer(data: ByteArray): Long
+    @JvmStatic external fun nFreeBuffer(address: Long)
+    /** Open a document from a pre-allocated buffer (no internal copy). */
+    @JvmStatic external fun nOpenDocumentFromMemory(address: Long, size: Long, password: String?): Long
 }
+
+// Render flag constants — match fpdfview.h.
+internal const val FPDF_ANNOT: Int = 0x01
+internal const val FPDF_LCD_TEXT: Int = 0x02
+internal const val FPDF_REVERSE_BYTE_ORDER: Int = 0x10

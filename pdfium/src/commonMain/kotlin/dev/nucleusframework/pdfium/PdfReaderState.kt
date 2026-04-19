@@ -63,17 +63,22 @@ class PdfReaderState internal constructor(
     internal suspend fun pageSize(pageIndex: Int): PageSize? =
         document?.pageSize(pageIndex)
 
-    internal suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap? {
+    internal suspend fun renderPage(
+        pageIndex: Int,
+        widthPx: Int,
+        heightPx: Int,
+        quality: RenderQuality = RenderQuality.FULL,
+    ): ImageBitmap? {
         val doc = document ?: return null
         if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
         cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return it }
-        val rendered = doc.renderPage(pageIndex, widthPx, heightPx)
+        val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
         cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
         return rendered
     }
 
     /** Fire-and-forget: ensure a page is in cache at the given width. Best-effort, swallows errors. */
-    fun prefetch(pageIndex: Int, widthPx: Int) {
+    fun prefetch(pageIndex: Int, widthPx: Int, quality: RenderQuality = RenderQuality.FULL) {
         if (widthPx <= 0) return
         scope.launch {
             val doc = document ?: return@launch
@@ -82,7 +87,7 @@ class PdfReaderState internal constructor(
             try {
                 val ps = doc.pageSize(pageIndex)
                 val heightPx = (widthPx / ps.aspectRatio).toInt().coerceAtLeast(1)
-                val rendered = doc.renderPage(pageIndex, widthPx, heightPx)
+                val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
                 cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
             } catch (_: Throwable) {
                 // Prefetch is opportunistic — drop failures.

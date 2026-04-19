@@ -13,10 +13,14 @@ internal expect class PdfDocument {
 
     /**
      * Render [pageIndex] into an RGBA bitmap sized [widthPx] × [heightPx] and return a Compose
-     * [androidx.compose.ui.graphics.ImageBitmap]. Implementations may reuse buffers between
-     * calls; the returned bitmap is owned by the caller.
+     * [androidx.compose.ui.graphics.ImageBitmap]. [quality] controls PDFium's rendering flags.
      */
-    suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): androidx.compose.ui.graphics.ImageBitmap
+    suspend fun renderPage(
+        pageIndex: Int,
+        widthPx: Int,
+        heightPx: Int,
+        quality: RenderQuality,
+    ): androidx.compose.ui.graphics.ImageBitmap
 
     /** Extract the Unicode text content of [pageIndex]. Returns empty string if the page has no text. */
     suspend fun pageText(pageIndex: Int): String

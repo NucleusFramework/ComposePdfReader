@@ -18,7 +18,7 @@ extern "C" {
 JNIEXPORT jboolean JNICALL
 Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToBitmap(
         JNIEnv* env, jclass, jlong page, jobject bitmap,
-        jint width, jint height) {
+        jint width, jint height, jint flags) {
     if (page == 0 || bitmap == nullptr) return JNI_FALSE;
 
     AndroidBitmapInfo info;
@@ -38,20 +38,18 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToBitmap(
     }
 
     const int stride = static_cast<int>(info.stride);
-    // PDFium renders atop existing content — pre-fill white.
     std::memset(pixels, 0xFF, static_cast<size_t>(stride) * static_cast<size_t>(height));
 
-    // Android Bitmap.Config.ARGB_8888 is actually stored as RGBA (in little-endian memory
-    // terms: R,G,B,A). PDFium's BGRA mode + FPDF_REVERSE_BYTE_ORDER flag yields RGBA.
+    // Android ARGB_8888 storage is R,G,B,A in memory → feed PDFium BGRA + reverse byte order.
+    // Caller's [flags] must include FPDF_REVERSE_BYTE_ORDER (we OR it in defensively here).
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, pixels, stride);
     if (!bmp) {
         AndroidBitmap_unlockPixels(env, bitmap);
         return JNI_FALSE;
     }
     FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xFFFFFFFF);
-    int flags = FPDF_ANNOT | FPDF_LCD_TEXT | FPDF_REVERSE_BYTE_ORDER;
     FPDF_RenderPageBitmap(bmp, reinterpret_cast<FPDF_PAGE>(page),
-                          0, 0, width, height, 0, flags);
+                          0, 0, width, height, 0, flags | FPDF_REVERSE_BYTE_ORDER);
     FPDFBitmap_Destroy(bmp);
 
     AndroidBitmap_unlockPixels(env, bitmap);

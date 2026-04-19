@@ -15,7 +15,6 @@ import dev.nucleusframework.pdfium.native.FPDF_GetPageCount
 import dev.nucleusframework.pdfium.native.FPDF_GetPageHeightF
 import dev.nucleusframework.pdfium.native.FPDF_GetPageWidthF
 import dev.nucleusframework.pdfium.native.FPDF_InitLibraryWithConfig
-import dev.nucleusframework.pdfium.native.FPDF_LCD_TEXT
 import dev.nucleusframework.pdfium.native.FPDF_LIBRARY_CONFIG
 import dev.nucleusframework.pdfium.native.FPDF_LoadMemDocument64
 import dev.nucleusframework.pdfium.native.FPDF_LoadPage
@@ -92,30 +91,34 @@ internal actual class PdfDocument(
         }
     }
 
-    actual suspend fun renderPage(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap =
-        withContext(pdfiumDispatcher) {
-            // N32 on little-endian = BGRA → no byte-swap; PDFium writes BGRA natively.
-            val info = ImageInfo.makeN32(widthPx, heightPx, ColorAlphaType.PREMUL)
-            val rowBytes = widthPx * 4
-            val bitmap = Bitmap().apply { allocPixels(info) }
-            val pixmap = bitmap.peekPixels()
-                ?: error("peekPixels returned null")
-            // Pixmap.addr on Kotlin/Native is a NativePointer (COpaquePointer).
-            val addr = pixmap.addr
-            val page = FPDF_LoadPage(handle, pageIndex)
-                ?: error("PDFium load page failed (err=${FPDF_GetLastError()})")
-            try {
-                val bmp = FPDFBitmap_CreateEx(widthPx, heightPx, FPDFBitmap_BGRA, addr, rowBytes)
-                    ?: error("FPDFBitmap_CreateEx returned null")
-                FPDFBitmap_FillRect(bmp, 0, 0, widthPx, heightPx, 0xFFFFFFFFu.toInt())
-                val flags = FPDF_ANNOT or FPDF_LCD_TEXT
-                FPDF_RenderPageBitmap(bmp, page, 0, 0, widthPx, heightPx, 0, flags)
-                FPDFBitmap_Destroy(bmp)
-            } finally {
-                FPDF_ClosePage(page)
+    actual suspend fun renderPage(
+        pageIndex: Int,
+        widthPx: Int,
+        heightPx: Int,
+        quality: RenderQuality,
+    ): ImageBitmap = withContext(pdfiumDispatcher) {
+        val info = ImageInfo.makeN32(widthPx, heightPx, ColorAlphaType.PREMUL)
+        val rowBytes = widthPx * 4
+        val bitmap = Bitmap().apply { allocPixels(info) }
+        val pixmap = bitmap.peekPixels() ?: error("peekPixels returned null")
+        val addr = pixmap.addr
+        val page = FPDF_LoadPage(handle, pageIndex)
+            ?: error("PDFium load page failed (err=${FPDF_GetLastError()})")
+        try {
+            val bmp = FPDFBitmap_CreateEx(widthPx, heightPx, FPDFBitmap_BGRA, addr, rowBytes)
+                ?: error("FPDFBitmap_CreateEx returned null")
+            FPDFBitmap_FillRect(bmp, 0, 0, widthPx, heightPx, 0xFFFFFFFFu.toInt())
+            val flags = when (quality) {
+                RenderQuality.PREVIEW -> 0
+                RenderQuality.FULL -> FPDF_ANNOT
             }
-            bitmap.asComposeImageBitmap()
+            FPDF_RenderPageBitmap(bmp, page, 0, 0, widthPx, heightPx, 0, flags)
+            FPDFBitmap_Destroy(bmp)
+        } finally {
+            FPDF_ClosePage(page)
         }
+        bitmap.asComposeImageBitmap()
+    }
 
     actual suspend fun pageText(pageIndex: Int): String = withContext(pdfiumDispatcher) {
         val page = FPDF_LoadPage(handle, pageIndex) ?: return@withContext ""

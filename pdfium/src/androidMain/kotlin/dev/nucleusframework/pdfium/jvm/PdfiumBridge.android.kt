@@ -34,6 +34,15 @@ internal object PdfiumBridge {
         bitmap: android.graphics.Bitmap,
         width: Int,
         height: Int,
+        flags: Int,
     ): Boolean
     @JvmStatic external fun nGetPageText(page: Long): String?
+
+    @JvmStatic external fun nAllocBuffer(data: ByteArray): Long
+    @JvmStatic external fun nFreeBuffer(address: Long)
+    @JvmStatic external fun nOpenDocumentFromMemory(address: Long, size: Long, password: String?): Long
 }
+
+internal const val FPDF_ANNOT: Int = 0x01
+internal const val FPDF_LCD_TEXT: Int = 0x02
+internal const val FPDF_REVERSE_BYTE_ORDER: Int = 0x10

@@ -1,5 +1,6 @@
 package dev.nucleusframework.pdfium.jvm
 
+import dev.nucleusframework.pdfium.RenderQuality
 import dev.nucleusframework.pdfium.openPdfDocument
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -33,7 +34,7 @@ fun main(args: Array<String>) = runBlocking {
     println("[kotlin] pages=${doc.pageCount} meta=${doc.metadata}")
     val size = doc.pageSize(0)
     println("[kotlin] page0=${size.widthPoints}x${size.heightPoints}pts")
-    val bmp = doc.renderPage(0, 600, (600 / size.aspectRatio).toInt())
+    val bmp = doc.renderPage(0, 600, (600 / size.aspectRatio).toInt(), RenderQuality.FULL)
     println("[kotlin] ImageBitmap ${bmp.width}x${bmp.height}")
     val text = doc.pageText(0)
     println("[kotlin] page0 text length=${text.length} preview=${text.take(60).replace("\n", "⏎")}")
@@ -42,7 +43,7 @@ fun main(args: Array<String>) = runBlocking {
     println("[stress] launching 64 parallel render+text+size calls…")
     coroutineScope {
         repeat(64) {
-            launch { doc.renderPage(0, 120, (120 / size.aspectRatio).toInt()) }
+            launch { doc.renderPage(0, 120, (120 / size.aspectRatio).toInt(), RenderQuality.PREVIEW) }
             launch { doc.pageSize(0) }
             launch { doc.pageText(0) }
         }
