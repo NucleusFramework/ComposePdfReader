@@ -49,7 +49,7 @@ fun PdfThumbnail(
         val ps = pageSize ?: state.pageSize(pageIndex)?.also { pageSize = it } ?: return@LaunchedEffect
         val renderW = containerSize.width.coerceIn(60, MAX_THUMBNAIL_WIDTH)
         val renderH = max(1, (renderW / ps.aspectRatio).roundToInt())
-        bitmap = state.renderPage(pageIndex, renderW, renderH, RenderQuality.PREVIEW)
+        bitmap = state.renderThumbnail(pageIndex, renderW, renderH)
     }
 
     val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT

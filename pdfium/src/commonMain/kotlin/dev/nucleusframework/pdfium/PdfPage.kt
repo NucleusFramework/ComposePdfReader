@@ -185,5 +185,8 @@ private fun TextSelectionLayer(layout: PageTextLayout, modifier: Modifier = Modi
 }
 
 private const val DEBOUNCE_MS = 100L
-private const val MAX_RENDER_WIDTH = 4096
+// 2048 px is enough for HiDPI displays (a 4K monitor renders a half-width page at ~1920 px).
+// Dropping from 4096 quarters per-page bitmap bytes (bytes scale with width², since height is
+// derived from aspect) and keeps the native-memory growth bounded when the user zooms in.
+private const val MAX_RENDER_WIDTH = 2048
 private const val DEFAULT_ASPECT = 595f / 842f // A4 portrait

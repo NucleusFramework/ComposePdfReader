@@ -1,3 +1,4 @@
+import io.github.kdroidfilter.nucleus.desktop.application.dsl.CompressionLevel
 import io.github.kdroidfilter.nucleus.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -102,6 +103,7 @@ dependencies {
 nucleus.application {
     mainClass = "dev.nucleusframework.pdf.MainKt"
 
+
     graalvm {
         isEnabled = true
         javaLanguageVersion = 25
@@ -117,12 +119,23 @@ nucleus.application {
     }
 
     nativeDistributions {
+        cleanupNativeLibs = true
+        compressionLevel = CompressionLevel.Maximum
         targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
         packageName = "NucleusPdf"
         packageVersion = "1.0.0"
+        homepage = "https://github.com/nucleusframework/nucleus-pdf"
         // jdk.security.auth: UnixSystem — required by FileKit's XDG/DBus picker on Linux.
         // java.management: DBus transport dependencies.
         // jdk.unsupported: used by various native-interop helpers.
         modules("jdk.security.auth", "java.management", "jdk.unsupported")
+        fileAssociation(
+            mimeType = "application/pdf",
+            extension = "pdf",
+            description = "PDF Document",
+        )
+        linux {
+            debMaintainer = "KDroidFilter <dev@kdroidfilter.com>"
+        }
     }
 }

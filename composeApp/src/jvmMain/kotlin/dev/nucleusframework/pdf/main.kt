@@ -14,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +35,7 @@ import dev.nucleusframework.pdf.design.type
 import dev.nucleusframework.pdf.reader.ReaderScreen
 import dev.nucleusframework.pdf.reader.ReaderScreenState
 import dev.nucleusframework.pdf.reader.rememberReaderScreenState
+import io.github.kdroidfilter.nucleus.core.runtime.DeepLinkHandler
 import io.github.kdroidfilter.nucleus.core.runtime.Platform
 import io.github.kdroidfilter.nucleus.darkmodedetector.isSystemInDarkMode
 import io.github.kdroidfilter.nucleus.graalvm.GraalVmInitializer
@@ -42,10 +44,14 @@ import io.github.kdroidfilter.nucleus.window.macOSLargeCornerRadius
 import io.github.kdroidfilter.nucleus.window.material.MaterialDecoratedWindow
 import io.github.kdroidfilter.nucleus.window.material.MaterialTitleBar
 import io.github.kdroidfilter.nucleus.window.newFullscreenControls
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 
 private val BrandAccent = Color(0xFF4464E5)
 
-fun main() {
+fun main(args: Array<String>) {
     GraalVmInitializer.initialize()
 
     application {
@@ -83,6 +89,11 @@ fun main() {
                 AppThemeProvider(isDark = isDark) {
                     val readerState = rememberReaderScreenState()
                     val onOpen = rememberOpenDocumentAction(readerState)
+
+                    LaunchedEffect(readerState) {
+                        DeepLinkHandler.register(args) { uri -> openFromUri(uri, readerState) }
+                        DeepLinkHandler.uri?.let { openFromUri(it, readerState) }
+                    }
 
                     Column(Modifier.fillMaxSize()) {
                         MaterialTitleBar(
@@ -173,4 +184,20 @@ private fun TitleBarScope.TitleBarAction(
             style = type.body.copy(color = colors.accentContent, fontWeight = FontWeight.Medium),
         )
     }
+}
+
+/**
+ * Resolve a Nucleus deep-link URI to a local file and load it into the reader.
+ *
+ * Accepts `file://` URIs (macOS Apple Events) as well as raw filesystem paths promoted to URIs
+ * by DeepLinkHandler on Linux/Windows. Non-file schemes are ignored.
+ */
+private fun openFromUri(uri: URI, state: ReaderScreenState) {
+    val path: Path = when {
+        uri.scheme.equals("file", ignoreCase = true) -> Paths.get(uri)
+        uri.scheme == null && !uri.path.isNullOrBlank() -> Paths.get(uri.path)
+        else -> return
+    }
+    if (!Files.isRegularFile(path)) return
+    state.openDocument(displayName = path.fileName?.toString()) { Files.readAllBytes(path) }
 }

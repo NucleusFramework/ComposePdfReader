@@ -20,12 +20,19 @@ import kotlinx.coroutines.sync.withLock
 @Stable
 class PdfReaderState internal constructor(
     cacheBytes: Long = DEFAULT_CACHE_BYTES,
+    thumbnailCacheBytes: Long = DEFAULT_THUMBNAIL_CACHE_BYTES,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val openMutex = Mutex()
     private val cacheMutex = Mutex()
+    private val thumbCacheMutex = Mutex()
+    // Reader-page cache: full-quality renders at viewport width. Sized for a handful of
+    // big bitmaps (±2 prefetch around the visible page).
     private val cache = PdfRenderCache(cacheBytes)
+    // Thumbnail cache: small preview renders for the sidebar/strip. Kept separate so that
+    // scrolling the thumbnail list doesn't evict reader-page bitmaps (and vice-versa).
+    private val thumbCache = PdfRenderCache(thumbnailCacheBytes)
     private var document: PdfDocument? = null
 
     var pageCount: Int by mutableStateOf(0)
@@ -47,6 +54,7 @@ class PdfReaderState internal constructor(
             document?.close()
             document = null
             cacheMutex.withLock { cache.clear() }
+            thumbCacheMutex.withLock { thumbCache.clear() }
             val doc = openPdfDocument(bytes, password)
             document = doc
             pageCount = doc.pageCount
@@ -72,9 +80,29 @@ class PdfReaderState internal constructor(
     ): ImageBitmap? {
         val doc = document ?: return null
         if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
-        cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return it }
+        // Only FULL renders are cached — PREVIEW is a transient low-res placeholder used to
+        // bootstrap the page while the full render is in flight, and is replaced on the next
+        // frame. Caching it would just double the footprint per page for no reuse.
+        if (quality == RenderQuality.FULL) {
+            cacheMutex.withLock { cache.get(pageIndex, widthPx) }?.let { return it }
+        }
         val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
-        cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+        if (quality == RenderQuality.FULL) {
+            cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+        }
+        return rendered
+    }
+
+    /**
+     * Render a page into the thumbnail cache (kept separate so sidebar scrolling doesn't
+     * evict reader-page bitmaps). Always uses [RenderQuality.PREVIEW].
+     */
+    internal suspend fun renderThumbnail(pageIndex: Int, widthPx: Int, heightPx: Int): ImageBitmap? {
+        val doc = document ?: return null
+        if (widthPx <= 0 || heightPx <= 0 || pageIndex !in 0 until pageCount) return null
+        thumbCacheMutex.withLock { thumbCache.get(pageIndex, widthPx) }?.let { return it }
+        val rendered = doc.renderPage(pageIndex, widthPx, heightPx, RenderQuality.PREVIEW)
+        thumbCacheMutex.withLock { thumbCache.put(pageIndex, widthPx, rendered) }
         return rendered
     }
 
@@ -89,7 +117,9 @@ class PdfReaderState internal constructor(
                 val ps = doc.pageSize(pageIndex)
                 val heightPx = (widthPx / ps.aspectRatio).toInt().coerceAtLeast(1)
                 val rendered = doc.renderPage(pageIndex, widthPx, heightPx, quality)
-                cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+                if (quality == RenderQuality.FULL) {
+                    cacheMutex.withLock { cache.put(pageIndex, widthPx, rendered) }
+                }
             } catch (_: Throwable) {
                 // Prefetch is opportunistic — drop failures.
             }
@@ -114,6 +144,7 @@ class PdfReaderState internal constructor(
                 document?.close()
                 document = null
                 cacheMutex.withLock { cache.clear() }
+                thumbCacheMutex.withLock { thumbCache.clear() }
             }
         }.invokeOnCompletion { scope.cancel() }
     }
@@ -121,14 +152,30 @@ class PdfReaderState internal constructor(
     internal fun launchOnScope(block: suspend CoroutineScope.() -> Unit): Job = scope.launch(block = block)
 
     companion object {
-        /** 150 MB default cache budget — tune via the [rememberPdfReaderState] overload. */
-        const val DEFAULT_CACHE_BYTES: Long = 150L * 1024 * 1024
+        /**
+         * 64 MB default budget for full-quality reader renders. At 2048 px max width this fits
+         * 3-4 pages — enough for the visible page + ±2 prefetch on a desktop viewport.
+         * Native pixels live outside the JVM heap, so oversizing this directly inflates the
+         * process RSS (Skia Cleaner only runs on GC pressure, which a tiny heap doesn't trigger).
+         */
+        const val DEFAULT_CACHE_BYTES: Long = 64L * 1024 * 1024
+
+        /**
+         * 12 MB for sidebar/strip thumbnails. At 240 px wide each thumbnail is ~280 KB, so this
+         * caches ~40 thumbs — plenty to cover a visible strip plus scroll momentum.
+         */
+        const val DEFAULT_THUMBNAIL_CACHE_BYTES: Long = 12L * 1024 * 1024
     }
 }
 
 @Composable
-fun rememberPdfReaderState(cacheBytes: Long = PdfReaderState.DEFAULT_CACHE_BYTES): PdfReaderState {
-    val state = remember(cacheBytes) { PdfReaderState(cacheBytes) }
+fun rememberPdfReaderState(
+    cacheBytes: Long = PdfReaderState.DEFAULT_CACHE_BYTES,
+    thumbnailCacheBytes: Long = PdfReaderState.DEFAULT_THUMBNAIL_CACHE_BYTES,
+): PdfReaderState {
+    val state = remember(cacheBytes, thumbnailCacheBytes) {
+        PdfReaderState(cacheBytes, thumbnailCacheBytes)
+    }
     DisposableEffect(state) {
         onDispose { state.dispose() }
     }

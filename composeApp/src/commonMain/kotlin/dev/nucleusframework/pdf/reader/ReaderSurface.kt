@@ -253,4 +253,6 @@ private fun PageCard(
     }
 }
 
-private const val MAX_RENDER_WIDTH = 4096
+// Must match PdfPage.kt so the prefetch hits the same quantized width bucket the visible
+// render uses. Bumping one without the other would fragment the cache.
+private const val MAX_RENDER_WIDTH = 2048
