@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -14,7 +15,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
@@ -37,8 +37,16 @@ fun PdfThumbnail(
     background: Color = Color.White,
 ) {
     var pageSize by remember(pageIndex, state.pageCount) { mutableStateOf<PageSize?>(null) }
-    var bitmap by remember(pageIndex) { mutableStateOf<ImageBitmap?>(null) }
+    val handleState = remember(pageIndex) { mutableStateOf<CachedBitmap?>(null) }
+    val handle = handleState.value
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    DisposableEffect(handleState) {
+        onDispose {
+            handleState.value?.release()
+            handleState.value = null
+        }
+    }
 
     LaunchedEffect(pageIndex, state.pageCount) {
         pageSize = state.pageSize(pageIndex)
@@ -49,7 +57,12 @@ fun PdfThumbnail(
         val ps = pageSize ?: state.pageSize(pageIndex)?.also { pageSize = it } ?: return@LaunchedEffect
         val renderW = containerSize.width.coerceIn(60, MAX_THUMBNAIL_WIDTH)
         val renderH = max(1, (renderW / ps.aspectRatio).roundToInt())
-        bitmap = state.renderThumbnail(pageIndex, renderW, renderH)
+        val next = state.renderThumbnail(pageIndex, renderW, renderH)
+        if (next != null) {
+            val old = handleState.value
+            handleState.value = next
+            old?.release()
+        }
     }
 
     val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT
@@ -60,7 +73,7 @@ fun PdfThumbnail(
             .background(background)
             .onSizeChanged { containerSize = it },
     ) {
-        val bmp = bitmap
+        val bmp = handle?.imageBitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp,
