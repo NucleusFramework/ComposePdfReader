@@ -15,11 +15,18 @@ internal class PdfRenderCache(private val maxBytes: Long) {
 
     private data class Key(val pageIndex: Int, val widthBucket: Int)
 
-    private val entries = LinkedHashMap<Key, ImageBitmap>(16, 0.75f, /* accessOrder = */ true)
+    // LinkedHashMap preserves insertion order. To simulate access-order LRU (available only on
+    // the JVM stdlib), `get` removes and reinserts the entry to bump it to the tail. Eviction
+    // iterates head-first, so the least-recently-used entry is dropped first.
+    private val entries = LinkedHashMap<Key, ImageBitmap>()
     private var currentBytes = 0L
 
-    fun get(pageIndex: Int, width: Int): ImageBitmap? =
-        entries[Key(pageIndex, quantize(width))]
+    fun get(pageIndex: Int, width: Int): ImageBitmap? {
+        val key = Key(pageIndex, quantize(width))
+        val value = entries.remove(key) ?: return null
+        entries[key] = value
+        return value
+    }
 
     fun put(pageIndex: Int, width: Int, bitmap: ImageBitmap) {
         val key = Key(pageIndex, quantize(width))
@@ -39,8 +46,11 @@ internal class PdfRenderCache(private val maxBytes: Long) {
         while (currentBytes > maxBytes && iter.hasNext()) {
             val entry = iter.next()
             if (entry.key == protect) continue
+            // Read the value before iter.remove(): Kotlin/Native's HashMap EntryRef throws
+            // ConcurrentModificationException if .value is touched after the backing map changed.
+            val evicted = bytesOf(entry.value)
             iter.remove()
-            currentBytes -= bytesOf(entry.value)
+            currentBytes -= evicted
         }
     }
 

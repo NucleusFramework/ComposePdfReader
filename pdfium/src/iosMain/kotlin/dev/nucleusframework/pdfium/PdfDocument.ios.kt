@@ -6,6 +6,10 @@ import dev.nucleusframework.pdfium.native.FPDFBitmap_BGRA
 import dev.nucleusframework.pdfium.native.FPDFBitmap_CreateEx
 import dev.nucleusframework.pdfium.native.FPDFBitmap_Destroy
 import dev.nucleusframework.pdfium.native.FPDFBitmap_FillRect
+import dev.nucleusframework.pdfium.native.FPDFText_ClosePage
+import dev.nucleusframework.pdfium.native.FPDFText_CountChars
+import dev.nucleusframework.pdfium.native.FPDFText_GetText
+import dev.nucleusframework.pdfium.native.FPDFText_LoadPage
 import dev.nucleusframework.pdfium.native.FPDF_ANNOT
 import dev.nucleusframework.pdfium.native.FPDF_CloseDocument
 import dev.nucleusframework.pdfium.native.FPDF_ClosePage
@@ -19,33 +23,31 @@ import dev.nucleusframework.pdfium.native.FPDF_LIBRARY_CONFIG
 import dev.nucleusframework.pdfium.native.FPDF_LoadMemDocument64
 import dev.nucleusframework.pdfium.native.FPDF_LoadPage
 import dev.nucleusframework.pdfium.native.FPDF_RenderPageBitmap
-import dev.nucleusframework.pdfium.native.FPDFText_ClosePage
-import dev.nucleusframework.pdfium.native.FPDFText_CountChars
-import dev.nucleusframework.pdfium.native.FPDFText_GetText
-import dev.nucleusframework.pdfium.native.FPDFText_LoadPage
+import cnames.structs.fpdf_document_t__
+import kotlin.concurrent.AtomicReference
 import kotlinx.cinterop.ByteVar
-import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.Pinned
+import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.get
+import kotlinx.cinterop.interpretCPointer
 import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.nativeHeap
+import kotlinx.cinterop.pin
 import kotlinx.cinterop.ptr
-import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.jetbrains.skia.Bitmap
+import org.jetbrains.skia.ColorAlphaType
+import org.jetbrains.skia.ImageInfo
 
 // PDFium is not thread-safe. Serialize every call through a single-threaded dispatcher.
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 private val pdfiumDispatcher = Dispatchers.Default.limitedParallelism(1)
-import org.jetbrains.skia.Bitmap
-import org.jetbrains.skia.ColorAlphaType
-import org.jetbrains.skia.ImageInfo
-import kotlin.concurrent.AtomicReference
 
 @OptIn(ExperimentalForeignApi::class)
 private object PdfiumInit {
@@ -67,7 +69,11 @@ private object PdfiumInit {
 
 @OptIn(ExperimentalForeignApi::class)
 internal actual class PdfDocument(
-    private val handle: COpaquePointer,
+    private val handle: CPointer<fpdf_document_t__>,
+    // PDFium keeps a borrowed reference to the source byte buffer for the document's lifetime.
+    // The pin must stay alive until close() or PDFium will dereference freed memory on the
+    // next FPDF_LoadPage / FPDF_GetMetaText call.
+    private val pinnedBuffer: Pinned<ByteArray>,
 ) {
     actual val pageCount: Int = FPDF_GetPageCount(handle)
     actual val metadata: PdfMetadata = PdfMetadata(
@@ -101,13 +107,14 @@ internal actual class PdfDocument(
         val rowBytes = widthPx * 4
         val bitmap = Bitmap().apply { allocPixels(info) }
         val pixmap = bitmap.peekPixels() ?: error("peekPixels returned null")
-        val addr = pixmap.addr
+        val addr = interpretCPointer<ByteVar>(pixmap.addr)
+            ?: error("Pixmap address is null")
         val page = FPDF_LoadPage(handle, pageIndex)
             ?: error("PDFium load page failed (err=${FPDF_GetLastError()})")
         try {
             val bmp = FPDFBitmap_CreateEx(widthPx, heightPx, FPDFBitmap_BGRA, addr, rowBytes)
                 ?: error("FPDFBitmap_CreateEx returned null")
-            FPDFBitmap_FillRect(bmp, 0, 0, widthPx, heightPx, 0xFFFFFFFFu.toInt())
+            FPDFBitmap_FillRect(bmp, 0, 0, widthPx, heightPx, 0xFFFFFFFFu.toULong())
             val flags = when (quality) {
                 RenderQuality.PREVIEW -> 0
                 RenderQuality.FULL -> FPDF_ANNOT
@@ -128,7 +135,7 @@ internal actual class PdfDocument(
                 val count = FPDFText_CountChars(textPage)
                 if (count <= 0) return@withContext ""
                 memScoped {
-                    val buf = allocArray<kotlinx.cinterop.UShortVar>(count + 1)
+                    val buf = allocArray<UShortVar>(count + 1)
                     FPDFText_GetText(textPage, 0, count, buf)
                     val chars = CharArray(count)
                     for (i in 0 until count) chars[i] = buf[i].toInt().toChar()
@@ -144,11 +151,12 @@ internal actual class PdfDocument(
 
     actual fun close() {
         FPDF_CloseDocument(handle)
+        pinnedBuffer.unpin()
     }
 }
 
 @OptIn(ExperimentalForeignApi::class)
-private fun readMetaTag(doc: COpaquePointer, tag: String): String? = memScoped {
+private fun readMetaTag(doc: CPointer<fpdf_document_t__>, tag: String): String? = memScoped {
     val size = FPDF_GetMetaText(doc, tag, null, 0u)
     if (size <= 2u) return@memScoped null
     val buf = allocArray<ByteVar>(size.toInt())
@@ -174,8 +182,12 @@ private fun ByteArray.decodeUtf16LE(): String {
 internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?): PdfDocument =
     withContext(pdfiumDispatcher) {
         PdfiumInit.ensure()
-        val handle: COpaquePointer = bytes.usePinned { pinned ->
-            FPDF_LoadMemDocument64(pinned.addressOf(0), bytes.size.convert(), password)
-        } ?: error("PDFium refused to open document (err=${FPDF_GetLastError()})")
-        PdfDocument(handle)
+        val pinned = bytes.pin()
+        val handle = FPDF_LoadMemDocument64(pinned.addressOf(0), bytes.size.convert(), password)
+        if (handle == null) {
+            val err = FPDF_GetLastError()
+            pinned.unpin()
+            error("PDFium refused to open document (err=$err)")
+        }
+        PdfDocument(handle, pinned)
     }

@@ -1,17 +1,17 @@
 package = dev.nucleusframework.pdfium.native
 language = C
-headers = fpdfview.h fpdf_doc.h
+headers = fpdfview.h fpdf_doc.h fpdf_text.h
 headerFilter = fpdf*.h
 
 # Headers are staged by the Gradle task `installPdfiumHeaders` under build/pdfium/include.
 compilerOpts = -Ibuild/pdfium/include
 
-# iOS device (arm64).
+# iOS device (arm64). bblanchon ships a dynamic lib; consumer app must embed libpdfium.dylib.
 libraryPaths.ios_arm64 = src/nativeInterop/libs/ios-arm64
-staticLibraries.ios_arm64 = libpdfium.a
+linkerOpts.ios_arm64 = -lpdfium
 
 # iOS simulator (arm64).
 libraryPaths.ios_simulator_arm64 = src/nativeInterop/libs/ios-simulator-arm64
-staticLibraries.ios_simulator_arm64 = libpdfium.a
+linkerOpts.ios_simulator_arm64 = -lpdfium
 
 linkerOpts = -framework CoreGraphics -framework Foundation -lc++

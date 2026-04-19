@@ -5,8 +5,10 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -48,8 +50,8 @@ val androidTriplets: List<Pair<String, String>> = listOf(
 )
 
 val iosTriplets: List<Pair<String, String>> = listOf(
-    "ios-arm64" to "pdfium-ios-device",
-    "ios-simulator-arm64" to "pdfium-ios-simulator",
+    "ios-arm64" to "pdfium-ios-device-arm64",
+    "ios-simulator-arm64" to "pdfium-ios-simulator-arm64",
 )
 
 val allArchives: Set<String> =
@@ -235,12 +237,55 @@ abstract class InstallHeadersTask : DefaultTask() {
     }
 }
 
+abstract class EmbedPdfiumDylibTask : DefaultTask() {
+    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val stagedLibsRoot: DirectoryProperty
+
+    @get:Input abstract val platformName: Property<String>
+    @get:Input abstract val targetBuildDir: Property<String>
+    @get:Input abstract val frameworksFolderPath: Property<String>
+    @get:Input @get:Optional abstract val signIdentity: Property<String>
+    @get:Input @get:Optional abstract val signingRequired: Property<String>
+
+    @get:javax.inject.Inject abstract val execOps: org.gradle.process.ExecOperations
+
+    @TaskAction
+    fun run() {
+        val platform = platformName.get()
+        require(platform.isNotBlank()) { "PLATFORM_NAME not set — run this task from Xcode." }
+        val triplet = when {
+            platform.startsWith("iphonesimulator") -> "ios-simulator-arm64"
+            platform.startsWith("iphoneos") -> "ios-arm64"
+            else -> error("Unsupported PLATFORM_NAME: '$platform'")
+        }
+        val dylib = stagedLibsRoot.get().dir(triplet).file("libpdfium.dylib").asFile
+        require(dylib.exists()) { "libpdfium.dylib missing at ${dylib.absolutePath}" }
+
+        val buildDir = targetBuildDir.get()
+        val frameworks = frameworksFolderPath.get()
+        require(buildDir.isNotBlank() && frameworks.isNotBlank()) {
+            "TARGET_BUILD_DIR / FRAMEWORKS_FOLDER_PATH must be set by Xcode."
+        }
+        val dest = File("$buildDir/$frameworks").apply { mkdirs() }.resolve(dylib.name)
+        dylib.copyTo(dest, overwrite = true)
+
+        if (signingRequired.orNull != "NO") {
+            val identity = signIdentity.orNull?.takeIf { it.isNotBlank() } ?: "-"
+            execOps.exec {
+                commandLine("codesign", "--force", "--sign", identity, dest.absolutePath)
+            }
+        }
+    }
+}
+
 abstract class InstallIosTask : DefaultTask() {
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val sources: ConfigurableFileCollection
     @get:Input abstract val triplets: ListProperty<String> // "triplet|archive"
     @get:Input abstract val archiveToDir: org.gradle.api.provider.MapProperty<String, String>
     @get:OutputDirectory abstract val outputRoot: DirectoryProperty
+
+    @get:javax.inject.Inject abstract val execOps: org.gradle.process.ExecOperations
 
     @TaskAction
     fun run() {
@@ -252,7 +297,15 @@ abstract class InstallIosTask : DefaultTask() {
             val libDir = File("$libDirPath/lib")
             val target = root.resolve(triplet).apply { mkdirs() }
             libDir.listFiles()?.forEach { src ->
-                if (src.name.endsWith(".a")) src.copyTo(target.resolve(src.name), overwrite = true)
+                if (src.name.endsWith(".dylib")) {
+                    val dst = target.resolve(src.name)
+                    src.copyTo(dst, overwrite = true)
+                    // bblanchon ships the dylib with install_name "./libpdfium.dylib".
+                    // Rewrite to @rpath so consumer apps can embed it under Frameworks/.
+                    execOps.exec {
+                        commandLine("install_name_tool", "-id", "@rpath/${src.name}", dst.absolutePath)
+                    }
+                }
             }
         }
     }
@@ -298,7 +351,7 @@ val installPdfiumHeaders = tasks.register<InstallHeadersTask>("installPdfiumHead
 
 val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
     group = "pdfium"
-    description = "Install iOS PDFium static libs for cinterop."
+    description = "Install iOS PDFium dynamic libs for cinterop."
     iosTriplets.forEach { (_, archive) ->
         sources.from(extractTasks.getValue(archive).map { it.outputs.files })
     }
@@ -306,6 +359,20 @@ val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
     triplets.set(iosTriplets.map { "${it.first}|${it.second}" })
     archiveToDir.set(iosTriplets.associate { it.second to pdfiumExtractDir.get().dir(it.second).asFile.absolutePath })
     outputRoot.set(iosStaticLibsDir)
+}
+
+val embedPdfiumDylibForXcode = tasks.register<EmbedPdfiumDylibTask>("embedPdfiumDylibForXcode") {
+    group = "pdfium"
+    description = "Copy & sign libpdfium.dylib into the iOS app bundle. Invoked from Xcode build phase."
+    dependsOn(installPdfiumIos)
+    outputs.upToDateWhen { false }
+
+    stagedLibsRoot.set(iosStaticLibsDir)
+    platformName.set(providers.environmentVariable("PLATFORM_NAME").orElse(""))
+    targetBuildDir.set(providers.environmentVariable("TARGET_BUILD_DIR").orElse(""))
+    frameworksFolderPath.set(providers.environmentVariable("FRAMEWORKS_FOLDER_PATH").orElse(""))
+    signIdentity.set(providers.environmentVariable("EXPANDED_CODE_SIGN_IDENTITY").orElse(""))
+    signingRequired.set(providers.environmentVariable("CODE_SIGNING_REQUIRED").orElse(""))
 }
 
 // ---------- JNI glue compilation ----------
