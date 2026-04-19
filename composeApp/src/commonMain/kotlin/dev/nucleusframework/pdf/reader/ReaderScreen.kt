@@ -37,6 +37,7 @@ fun ReaderScreen(
     onOpenClick: () -> Unit,
     modifier: Modifier = Modifier,
     showFileHeader: Boolean = true,
+    showControlsBar: Boolean = true,
 ) {
     LaunchedEffect(state.currentPage, state.reader.pageCount) {
         val visible = state.thumbListState.layoutInfo.visibleItemsInfo.map { it.index }
@@ -62,7 +63,7 @@ fun ReaderScreen(
                     )
                     HDivider()
                 }
-                if (hasDocument) {
+                if (hasDocument && showControlsBar) {
                     ReaderControlsBar(
                         reader = state.reader,
                         spreadMode = state.spreadMode,

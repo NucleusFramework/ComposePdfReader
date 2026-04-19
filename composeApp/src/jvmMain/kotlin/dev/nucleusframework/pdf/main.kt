@@ -1,6 +1,7 @@
 package dev.nucleusframework.pdf
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +32,15 @@ import dev.nucleusframework.pdf.design.AppText
 import dev.nucleusframework.pdf.design.AppThemeProvider
 import dev.nucleusframework.pdf.design.Spinner
 import dev.nucleusframework.pdf.design.colors
+import dev.nucleusframework.pdf.design.shapes
 import dev.nucleusframework.pdf.design.type
 import dev.nucleusframework.pdf.reader.ReaderScreen
 import dev.nucleusframework.pdf.reader.ReaderScreenState
+import dev.nucleusframework.pdf.reader.SpreadMode
+import dev.nucleusframework.pdf.reader.ZOOM_MAX
+import dev.nucleusframework.pdf.reader.ZOOM_MIN
 import dev.nucleusframework.pdf.reader.rememberReaderScreenState
+import kotlin.math.roundToInt
 import io.github.kdroidfilter.nucleus.core.runtime.DeepLinkHandler
 import io.github.kdroidfilter.nucleus.core.runtime.Platform
 import io.github.kdroidfilter.nucleus.darkmodedetector.isSystemInDarkMode
@@ -44,6 +50,7 @@ import io.github.kdroidfilter.nucleus.window.macOSLargeCornerRadius
 import io.github.kdroidfilter.nucleus.window.material.MaterialDecoratedWindow
 import io.github.kdroidfilter.nucleus.window.material.MaterialTitleBar
 import io.github.kdroidfilter.nucleus.window.newFullscreenControls
+import java.awt.Desktop
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -91,8 +98,24 @@ fun main(args: Array<String>) {
                     val onOpen = rememberOpenDocumentAction(readerState)
 
                     LaunchedEffect(readerState) {
+                        // Nucleus DeepLinkHandler only dispatches args with a URI scheme (e.g.
+                        // `myapp://…`). File associations deliver raw filesystem paths on Linux/
+                        // Windows and via `setOpenFileHandler` on macOS — wire those directly.
                         DeepLinkHandler.register(args) { uri -> openFromUri(uri, readerState) }
                         DeepLinkHandler.uri?.let { openFromUri(it, readerState) }
+
+                        args.firstOrNull { it.endsWith(".pdf", ignoreCase = true) }
+                            ?.let { openFromPath(Paths.get(it), readerState) }
+
+                        if (Desktop.isDesktopSupported()) {
+                            runCatching {
+                                Desktop.getDesktop().setOpenFileHandler { event ->
+                                    event.files.firstOrNull()?.let {
+                                        openFromPath(it.toPath(), readerState)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Column(Modifier.fillMaxSize()) {
@@ -108,6 +131,7 @@ fun main(args: Array<String>) {
                                 state = readerState,
                                 onOpenClick = onOpen,
                                 showFileHeader = false,
+                                showControlsBar = false,
                             )
                         }
                     }
@@ -130,12 +154,56 @@ private fun TitleBarScope.TitleBarBody(
     // macOS: native buttons on the LEFT → our content goes to the End.
     // Windows/Linux: native buttons on the RIGHT → content goes to the Start.
     val actionSide = if (Platform.Current == Platform.MacOS) Alignment.End else Alignment.Start
+    val hasDocument = state.reader.pageCount > 0
 
-    TitleBarAction(
-        text = "Open PDF",
-        onClick = onOpen,
-        modifier = Modifier.align(actionSide),
-    )
+    if (hasDocument) {
+        Row(
+            modifier = Modifier.align(actionSide).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TitleBarAction(text = "Open PDF", onClick = onOpen)
+            TitleBarSeparator()
+            TitleBarGhostAction(
+                text = "−",
+                onClick = {
+                    state.reader.renderScale =
+                        (state.reader.renderScale - ZOOM_STEP).coerceAtLeast(ZOOM_MIN)
+                },
+            )
+            Spacer(Modifier.width(4.dp))
+            Box(
+                Modifier
+                    .clip(shapes.small)
+                    .border(1.dp, colors.border, shapes.small)
+                    .background(colors.surfaceRaised)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                AppText(
+                    text = "${(state.reader.renderScale * 100).roundToInt()}%",
+                    style = type.body,
+                )
+            }
+            Spacer(Modifier.width(4.dp))
+            TitleBarGhostAction(
+                text = "+",
+                onClick = {
+                    state.reader.renderScale =
+                        (state.reader.renderScale + ZOOM_STEP).coerceAtMost(ZOOM_MAX)
+                },
+            )
+            TitleBarSeparator()
+            TitleBarGhostAction(text = "Fit W", onClick = state::fitWidth)
+            Spacer(Modifier.width(4.dp))
+            TitleBarGhostAction(text = "Fit H", onClick = state::fitHeight)
+            Spacer(Modifier.width(4.dp))
+            TitleBarGhostAction(text = "Fit", onClick = state::fitPage)
+            TitleBarSeparator()
+            TitleBarGhostAction(
+                text = if (state.spreadMode == SpreadMode.Double) "Single" else "Spread",
+                onClick = state::toggleSpreadMode,
+            )
+        }
+    }
 
     Row(
         modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -161,6 +229,8 @@ private fun TitleBarScope.TitleBarBody(
     }
 }
 
+private const val ZOOM_STEP = 0.25f
+
 /**
  * Compact filled action button sized for a Nucleus title bar. Uses [titleBarClickable] so
  * the tap survives macOS fullscreen phantom pointer events.
@@ -173,7 +243,6 @@ private fun TitleBarScope.TitleBarAction(
 ) {
     Box(
         modifier = modifier
-            .padding(horizontal = 8.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(colors.accent)
             .titleBarClickable(onClick)
@@ -184,6 +253,35 @@ private fun TitleBarScope.TitleBarAction(
             style = type.body.copy(color = colors.accentContent, fontWeight = FontWeight.Medium),
         )
     }
+}
+
+/** Outlined title-bar button — secondary action sitting alongside the primary one. */
+@Composable
+private fun TitleBarScope.TitleBarGhostAction(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .clip(shapes.small)
+            .border(1.dp, colors.border, shapes.small)
+            .background(colors.surfaceRaised)
+            .titleBarClickable(onClick)
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+    ) {
+        AppText(text = text, style = type.body)
+    }
+}
+
+@Composable
+private fun TitleBarSeparator() {
+    Box(
+        Modifier
+            .padding(horizontal = 8.dp)
+            .size(width = 1.dp, height = 16.dp)
+            .background(colors.border),
+    )
 }
 
 /**
@@ -198,6 +296,10 @@ private fun openFromUri(uri: URI, state: ReaderScreenState) {
         uri.scheme == null && !uri.path.isNullOrBlank() -> Paths.get(uri.path)
         else -> return
     }
+    openFromPath(path, state)
+}
+
+private fun openFromPath(path: Path, state: ReaderScreenState) {
     if (!Files.isRegularFile(path)) return
     state.openDocument(displayName = path.fileName?.toString()) { Files.readAllBytes(path) }
 }
