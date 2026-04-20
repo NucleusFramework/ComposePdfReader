@@ -242,30 +242,46 @@ private fun TextSelectionLayer(layout: PageTextLayout, modifier: Modifier = Modi
                     if (a < 0 || b < 0 || order.size == 0) return@drawBehind
                     val lo = min(a, b)
                     val hi = max(a, b)
-                    // Use per-line expanded vertical bounds so the highlight stays visible
-                    // even when PDFium reports near-zero char heights (Hebrew iText PDFs).
-                    var currentLineIdx = order.lineOf(lo)
-                    var currentLine = if (currentLineIdx >= 0) order.lines[currentLineIdx] else null
-                    for (pos in lo..hi) {
-                        if (pos < 0 || pos >= order.size) continue
-                        val ln = order.lineOf(pos)
-                        if (ln != currentLineIdx) {
-                            currentLineIdx = ln
-                            currentLine = if (ln >= 0) order.lines[ln] else null
-                        }
-                        val line = currentLine ?: continue
-                        val pdfIdx = order.pdfiumOf(pos)
-                        val leftPx = layout.charLeft(pdfIdx) * scaleX
-                        val rightPx = layout.charRight(pdfIdx) * scaleX
+                    // One continuous rectangle per line (Chrome-style), spanning from the
+                    // leftmost selected char's left edge to the rightmost's right edge, at
+                    // the line's expanded vertical bounds. This fills inter-char gaps and
+                    // whitespace naturally, instead of painting a sliver per glyph.
+                    var currentLineIdx = -1
+                    var currentLine: LineRange? = null
+                    var minLeft = Float.POSITIVE_INFINITY
+                    var maxRight = Float.NEGATIVE_INFINITY
+                    fun flush() {
+                        val line = currentLine ?: return
+                        if (minLeft > maxRight) return
+                        val leftPx = minLeft * scaleX
+                        val rightPx = maxRight * scaleX
                         val topPx = containerH - line.hitTop * scaleY
                         val bottomPx = containerH - line.hitBottom * scaleY
-                        if (rightPx <= leftPx || bottomPx <= topPx) continue
+                        if (rightPx <= leftPx || bottomPx <= topPx) return
                         drawRect(
                             color = SELECTION_COLOR,
                             topLeft = Offset(leftPx, topPx),
                             size = Size(rightPx - leftPx, bottomPx - topPx),
                         )
                     }
+                    for (pos in lo..hi) {
+                        if (pos < 0 || pos >= order.size) continue
+                        val ln = order.lineOf(pos)
+                        if (ln != currentLineIdx) {
+                            flush()
+                            currentLineIdx = ln
+                            currentLine = if (ln >= 0) order.lines[ln] else null
+                            minLeft = Float.POSITIVE_INFINITY
+                            maxRight = Float.NEGATIVE_INFINITY
+                        }
+                        if (currentLine == null) continue
+                        val pdfIdx = order.pdfiumOf(pos)
+                        val l = layout.charLeft(pdfIdx)
+                        val r = layout.charRight(pdfIdx)
+                        if (l < minLeft) minLeft = l
+                        if (r > maxRight) maxRight = r
+                    }
+                    flush()
                 },
         )
     }
