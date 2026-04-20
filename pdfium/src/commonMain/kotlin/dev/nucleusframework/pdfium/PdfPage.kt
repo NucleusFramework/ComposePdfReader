@@ -426,7 +426,7 @@ private fun buildReadingOrder(layout: PageTextLayout): ReadingOrder {
     //         by column membership and lay out column 1 entirely before column 2.
     val gutter = detectGutter(subLines, layout.pageSize.widthPoints)
 
-    val orderedLines: List<ArrayList<CharEntry>> = if (gutter != null) {
+    val orderedLinesRaw: List<ArrayList<CharEntry>> = if (gutter != null) {
         val left = ArrayList<ArrayList<CharEntry>>()
         val right = ArrayList<ArrayList<CharEntry>>()
         for (sl in subLines) {
@@ -444,6 +444,13 @@ private fun buildReadingOrder(layout: PageTextLayout): ReadingOrder {
             .thenBy { it.first().left }
         subLines.sortedWith(byReading)
     }
+
+    // Drop decorative "garbage" lines — short CID runs or sub-glyphs that PDFium exposes
+    // between real text rows (typical in scanned/cursive Hebrew PDFs with incomplete
+    // ToUnicode mappings). If the page has substantial lines, we filter the ones clearly
+    // below the dominant length. Matches Chrome's behaviour of ignoring them in both
+    // selection and copy.
+    val orderedLines = filterNoiseLines(orderedLinesRaw)
 
     // Step 5: flatten — RTL-aware ordering within each line.
     val sortedToPdfium = IntArray(chars.size)
@@ -525,6 +532,28 @@ private fun expandLineHitBounds(lines: List<LineRange>): Array<LineRange> {
     }
     @Suppress("UNCHECKED_CAST")
     return result as Array<LineRange>
+}
+
+/**
+ * Drop "noise" lines — very short runs surrounded by much longer ones. These are almost
+ * always decorative sub-glyphs, positioning markers, or CID fallback runs from fonts
+ * without a proper ToUnicode cmap (common in older Hebrew, Arabic, and scan-rebuilt
+ * PDFs). Keeping them in the reading order would both pollute the copy text and let
+ * the selection highlight flicker through bands of meaningless characters.
+ *
+ * Heuristic: if any line on the page is ≥ [NOISE_BASELINE] chars, treat lines shorter
+ * than ~1/6 of the dominant length (floored at [MIN_NOISE_CUTOFF]) as noise. For pages
+ * made entirely of short lines (ToC, title pages, lists) nothing is filtered.
+ */
+private fun filterNoiseLines(lines: List<ArrayList<CharEntry>>): List<ArrayList<CharEntry>> {
+    if (lines.isEmpty()) return lines
+    var maxLen = 0
+    for (l in lines) if (l.size > maxLen) maxLen = l.size
+    if (maxLen < NOISE_BASELINE) return lines
+    val threshold = max(MIN_NOISE_CUTOFF, maxLen / 6)
+    val kept = ArrayList<ArrayList<CharEntry>>(lines.size)
+    for (l in lines) if (l.size >= threshold) kept.add(l)
+    return if (kept.isEmpty()) lines else kept
 }
 
 /**
@@ -682,17 +711,15 @@ private fun buildSelectedText(
 ): String {
     if (lo > hi || order.size == 0) return ""
     val sb = StringBuilder()
-    var prevLine = order.lineOf(lo)
+    var prevLine = -1
     for (pos in lo..hi) {
         if (pos < 0 || pos >= order.size) continue
         val ln = order.lineOf(pos)
-        if (ln >= 0 && ln != prevLine) {
-            sb.append('\n')
-            prevLine = ln
-        }
+        if (prevLine >= 0 && ln != prevLine) sb.append('\n')
         val cp = layout.codepoint(order.pdfiumOf(pos))
         if (cp <= 0) continue
         appendCodepoint(sb, cp)
+        prevLine = ln
     }
     return sb.toString()
 }
@@ -719,6 +746,12 @@ private const val COLUMN_GAP_MULT = 3f
 // column to compute a real gap from — e.g. the only line on a title page. Typical body
 // text is ~10-14pt tall, so 6pt each side gives a comfortable click target.
 private const val DEFAULT_HIT_EXPAND = 6f
+
+// Noise-filter knobs: a page whose longest line has this many chars or more is assumed
+// to be "real" text. Anything shorter than a fraction of that length (but at least
+// MIN_NOISE_CUTOFF) is dropped as decorative.
+private const val NOISE_BASELINE = 20
+private const val MIN_NOISE_CUTOFF = 6
 
 private const val DEBOUNCE_MS = 100L
 // 2048 px is enough for HiDPI displays (a 4K monitor renders a half-width page at ~1920 px).
