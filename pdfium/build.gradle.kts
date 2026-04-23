@@ -1,3 +1,5 @@
+@file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+
 import de.undercouch.gradle.tasks.download.Download
 import java.io.File
 import org.apache.tools.ant.taskdefs.condition.Os
@@ -54,10 +56,13 @@ val iosTriplets: List<Pair<String, String>> = listOf(
     "ios-simulator-arm64" to "pdfium-ios-simulator-arm64",
 )
 
+val wasmArchive = "pdfium-wasm"
+
 val allArchives: Set<String> =
     (jvmTriplets.map { it.archive } +
         androidTriplets.map { it.second } +
-        iosTriplets.map { it.second }).toSet()
+        iosTriplets.map { it.second } +
+        listOf(wasmArchive)).toSet()
 
 val downloadTasks: Map<String, TaskProvider<Download>> = allArchives.associateWith { archive ->
     tasks.register<Download>("downloadPdfium_$archive") {
@@ -88,6 +93,13 @@ kotlin {
 
     jvm()
 
+    wasmJs {
+        browser()
+        compilerOptions {
+            optIn.add("kotlin.js.ExperimentalWasmJsInterop")
+        }
+    }
+
     // iOS targets are always declared so downstream KMP modules can resolve them on any host.
     // On non-Mac hosts the actual compilation is disabled via kotlin.native.ignoreDisabledTargets.
     val iosTargets = listOf(iosArm64(), iosSimulatorArm64())
@@ -115,6 +127,9 @@ kotlin {
         }
         androidMain.dependencies { implementation(libs.kotlinx.coroutinesAndroid) }
         jvmMain.dependencies { implementation(libs.kotlinx.coroutinesSwing) }
+        wasmJsMain.dependencies {
+            implementation(libs.kotlinx.browser)
+        }
     }
 }
 
@@ -314,6 +329,7 @@ abstract class InstallIosTask : DefaultTask() {
 val nativeJniResourceDir = layout.projectDirectory.dir("src/jvmMain/resources/pdfium/native")
 val androidJniLibsDir = layout.projectDirectory.dir("src/androidMain/jniLibs")
 val iosStaticLibsDir = layout.projectDirectory.dir("src/nativeInterop/libs")
+val wasmResourceDir = layout.projectDirectory.dir("src/wasmJsMain/resources/pdfium")
 val stagedHeadersDir = layout.buildDirectory.dir("pdfium/include")
 
 fun extractedDir(archive: String) = pdfiumExtractDir.map { it.dir(archive) }
@@ -347,6 +363,72 @@ val installPdfiumHeaders = tasks.register<InstallHeadersTask>("installPdfiumHead
     // linux-x64 is always downloaded; its include/ is identical to every other archive's include/.
     sources.from(extractTasks.getValue("pdfium-linux-x64").map { it.outputs.files })
     outputDir.set(stagedHeadersDir)
+}
+
+val installPdfiumWasm = tasks.register<Copy>("installPdfiumWasm") {
+    group = "pdfium"
+    description = "Stage pdfium.wasm into the wasmJs resources directory."
+    dependsOn(extractTasks.getValue(wasmArchive))
+    from(pdfiumExtractDir.map { it.dir(wasmArchive).dir("lib") }) {
+        include("pdfium.wasm")
+    }
+    into(wasmResourceDir)
+}
+
+// Emscripten's classic JS glue expects to run as a top-level <script>. To consume it
+// from an ES module without injecting a <script> tag (which browsers refuse to load
+// from file:// and which breaks the clean import graph of the example), we embed the
+// JS source verbatim into `pdfium_runtime.mjs` and run it via indirect eval — this
+// executes in global scope, so the glue's top-level `var Module = …` resolves to
+// `globalThis.Module`, preserving our preconfigured object.
+val generatePdfiumWasmRuntime = tasks.register("generatePdfiumWasmRuntime") {
+    group = "pdfium"
+    description = "Wrap bblanchon's pdfium.js into an ES module (pdfium_runtime.mjs)."
+    dependsOn(extractTasks.getValue(wasmArchive))
+    val pdfiumJs = pdfiumExtractDir.map { it.dir(wasmArchive).dir("lib").file("pdfium.js") }
+    val outputMjs = wasmResourceDir.file("pdfium_runtime.mjs")
+    inputs.file(pdfiumJs)
+    outputs.file(outputMjs)
+    doLast {
+        val jsText = pdfiumJs.get().asFile.readText()
+        val escaped = buildString(jsText.length + 64) {
+            append('"')
+            for (c in jsText) when (c) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                in '\u0000'..'\u001F' -> append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                '\u2028' -> append("\\u2028")
+                '\u2029' -> append("\\u2029")
+                else -> append(c)
+            }
+            append('"')
+        }
+        outputMjs.asFile.writeText(
+            """
+            |// Auto-generated — do not edit. Embeds bblanchon's emscripten-built pdfium.js as
+            |// an ES module factory. See :pdfium:generatePdfiumWasmRuntime.
+            |
+            |const PDFIUM_JS_SOURCE = $escaped;
+            |
+            |export function initPdfium(config) {
+            |    return new Promise((resolve, reject) => {
+            |        const Module = Object.assign({}, config, {
+            |            onRuntimeInitialized() { resolve(Module); },
+            |            onAbort(reason) { reject(new Error('pdfium aborted: ' + reason)); },
+            |        });
+            |        globalThis.Module = Module;
+            |        (0, eval)(PDFIUM_JS_SOURCE);
+            |    });
+            |}
+            |
+            """.trimMargin()
+        )
+    }
 }
 
 val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
@@ -435,6 +517,10 @@ val buildJniWindowsArm = tasks.register<Exec>("buildJniWindowsArm") {
 
 tasks.named("jvmProcessResources") {
     dependsOn(installPdfiumJvmResources, buildJniLinux, buildJniMacOs, buildJniWindows, buildJniWindowsArm)
+}
+
+tasks.named("wasmJsProcessResources") {
+    dependsOn(installPdfiumWasm, generatePdfiumWasmRuntime)
 }
 
 tasks.matching { it.name == "preBuild" || it.name == "preDebugBuild" || it.name == "preReleaseBuild" }.configureEach {

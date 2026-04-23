@@ -1,6 +1,9 @@
+@file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+
 import io.github.kdroidfilter.nucleus.desktop.application.dsl.CompressionLevel
 import io.github.kdroidfilter.nucleus.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.targets.js.ir.DefaultIncrementalSyncTask
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -30,6 +33,16 @@ kotlin {
 
     jvm()
 
+    wasmJs {
+        outputModuleName.set("composeApp")
+        browser {
+            commonWebpackConfig {
+                outputFileName = "composeApp.js"
+            }
+        }
+        binaries.executable()
+    }
+
     sourceSets {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
@@ -50,6 +63,9 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+        }
+        wasmJsMain.dependencies {
+            implementation(libs.kotlinx.browser)
         }
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
@@ -94,6 +110,60 @@ android {
 
 dependencies {
     debugImplementation(libs.compose.uiTooling)
+}
+
+// The :pdfium module ships pdfium_glue.mjs, pdfium_runtime.mjs (wrapped emscripten JS),
+// and pdfium.wasm. We copy the trio flat into composeApp's incremental sync dir (next
+// to composeApp.mjs) so `@JsModule("./pdfium_glue.mjs")` resolves against it — the same
+// layout kotlin-wasm-examples/browser-c-interop uses for its own .mjs/.wasm pair.
+val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/wasmJsMain/resources/pdfium")
+
+// The compile-sync task is destructive: it mirrors its declared inputs into the webpack
+// package dir and deletes anything else. So we run our copy *after* the sync finishes,
+// via `finalizedBy`, and have the Webpack task depend on the copy — this way pdfium_glue
+// (plus sibling .mjs/.wasm assets) land next to composeApp.mjs before webpack resolves
+// `@JsModule("./pdfium_glue.mjs")`.
+val syncTaskName = if (project.hasProperty("isProduction")
+    || project.gradle.startParameter.taskNames.any { it.endsWith("Distribution") }
+) {
+    "wasmJsProductionExecutableCompileSync"
+} else {
+    "wasmJsDevelopmentExecutableCompileSync"
+}
+
+val copyPdfiumWasmAssets by tasks.registering(Copy::class) {
+    dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
+    from(pdfiumWasmDir) {
+        include("pdfium_glue.mjs", "pdfium_runtime.mjs", "pdfium_worker.mjs", "pdfium.wasm")
+    }
+    into(tasks.named<DefaultIncrementalSyncTask>(syncTaskName).flatMap { it.destinationDirectory })
+}
+
+tasks.named(syncTaskName) { finalizedBy(copyPdfiumWasmAssets) }
+
+tasks.matching {
+    it.name in setOf(
+        "wasmJsBrowserDevelopmentWebpack",
+        "wasmJsBrowserProductionWebpack",
+        "wasmJsBrowserDevelopmentRun",
+        "wasmJsBrowserProductionRun",
+    )
+}.configureEach { dependsOn(copyPdfiumWasmAssets) }
+
+// Webpack bundles pdfium_glue.mjs and pdfium_runtime.mjs into composeApp.js via their
+// ES imports, but pdfium_worker.mjs is loaded at runtime via `new Worker(urlString)` —
+// webpack can't statically see the reference, so it doesn't bundle the worker. Same
+// for pdfium.wasm, which Emscripten fetches at runtime. Both must be served as static
+// files next to the bundle, so we copy them into processedResources (picked up by the
+// dev server and the final dist).
+val copyPdfiumWasmToResources by tasks.registering(Copy::class) {
+    dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
+    from(pdfiumWasmDir) { include("pdfium.wasm", "pdfium_worker.mjs", "pdfium_runtime.mjs") }
+    into(layout.buildDirectory.dir("processedResources/wasmJs/main"))
+}
+
+tasks.matching { it.name == "wasmJsProcessResources" }.configureEach {
+    dependsOn(copyPdfiumWasmToResources)
 }
 
 // Nucleus handles packaging, native distributions and GraalVM native-image.
