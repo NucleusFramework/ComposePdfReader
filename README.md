@@ -24,11 +24,12 @@ selectable text.
 
 ## Supported targets
 
-| Target  | Architectures                                 | Backend                               |
-| ------- | --------------------------------------------- | ------------------------------------- |
-| JVM     | linux-x64, linux-arm64, macos-x64, macos-arm64, win-x64, win-arm64 | JNI + Skia (Skiko)                    |
-| Android | arm64-v8a, armeabi-v7a, x86, x86_64           | JNI (NDK `AndroidBitmap_*`)           |
-| iOS     | iosArm64, iosSimulatorArm64                   | Kotlin/Native cinterop + Skia (Skiko) |
+| Target  | Architectures                                                      | Backend                                           |
+| ------- | ------------------------------------------------------------------ | ------------------------------------------------- |
+| JVM     | linux-x64, linux-arm64, macos-x64, macos-arm64, win-x64, win-arm64 | JNI + Skia (Skiko)                                |
+| Android | arm64-v8a, armeabi-v7a, x86, x86_64                                | JNI (NDK `AndroidBitmap_*`)                       |
+| iOS     | iosArm64, iosSimulatorArm64                                        | Kotlin/Native cinterop + Skia (Skiko)             |
+| Web     | Kotlin/WasmJS, Kotlin/JS (IR)                                      | `pdfium.wasm` in a dedicated Web Worker + Skiko   |
 
 PDFium binaries are fetched automatically at build time from
 bblanchon's GitHub releases (pinned in `gradle/libs.versions.toml` →
@@ -36,26 +37,72 @@ bblanchon's GitHub releases (pinned in `gradle/libs.versions.toml` →
 
 ## Installation
 
-The library lives in the `:pdfium` Gradle module of this repository. To use it
-in your own app, either publish it to a Maven repository or include it as a
-composite build / git submodule. Once available, declare:
+Published to Maven Central. Requires Gradle 8.10+ and Kotlin 2.3.20+. The
+`:pdfium` module uses a JVM toolchain of 17.
+
+Add the Maven Central repository and the dependency:
 
 ```kotlin
 // settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        google()
+    }
+}
+```
+
+### With a Gradle version catalog (`gradle/libs.versions.toml`)
+
+```toml
+[versions]
+pdfium-kt = "0.1.0"
+
+[libraries]
+pdfium-kt = { module = "dev.nucleusframework.pdf:pdfium", version.ref = "pdfium-kt" }
+```
+
+```kotlin
+// app/build.gradle.kts
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation(libs.pdfium.kt)
+        }
+    }
+}
+```
+
+### Without a version catalog
+
+```kotlin
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation("dev.nucleusframework.pdf:pdfium:0.1.0")
+        }
+    }
+}
+```
+
+### Snapshot / local development
+
+Inside this monorepo, consume it as a typesafe project accessor:
+
+```kotlin
+// settings.gradle.kts
+enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 include(":pdfium")
 
 // app/build.gradle.kts
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation(projects.pdfium) // or implementation("dev.nucleusframework:pdfium:<version>")
+            implementation(projects.pdfium)
         }
     }
 }
 ```
-
-Gradle 9.4.1+ and Kotlin 2.3.20+ are required. The `:pdfium` module sets a JVM
-toolchain of 17.
 
 ### JVM packaging
 
@@ -72,6 +119,16 @@ compose.desktop {
     }
 }
 ```
+
+### Web packaging (wasmJS / JS)
+
+For the browser targets, the `pdfium.wasm` + worker assets are published as
+classpath resources inside the library artifact and served from the module
+root. If you bundle your app with the default Kotlin/JS webpack pipeline, no
+extra configuration is needed — the `@JsModule("./pdfium_glue.mjs")` imports
+resolve against your webpack output directory. Remember to serve the site over
+HTTPS (or `localhost`): the Web Clipboard API used by text copy only works in
+secure contexts.
 
 ## Quick start
 
@@ -110,13 +167,14 @@ The state holder tied to a single PDF document. Hoist it in your screen
 composable with `rememberPdfReaderState()`.
 
 ```kotlin
-class PdfReaderState internal constructor(cacheBytes: Long = DEFAULT_CACHE_BYTES) {
+@Stable
+class PdfReaderState {
     // --- Snapshot state ---
-    var pageCount: Int      // 0 until a document is open
-    var isLoading: Boolean  // true during open()
-    var error: PdfError?    // last open() error, if any
-    var metadata: PdfMetadata
-    var renderScale: Float  // 1.0 = fit-to-width; scales the size reported to PdfPage
+    val pageCount: Int        // 0 until a document is open
+    val isLoading: Boolean    // true during open()
+    val error: PdfError?      // last open() error, if any
+    val metadata: PdfMetadata
+    var renderScale: Float    // 1.0 = fit-to-width; scales the size reported to PdfPage
 
     // --- Intents ---
     suspend fun open(bytes: ByteArray, password: String? = null)
@@ -131,19 +189,26 @@ class PdfReaderState internal constructor(cacheBytes: Long = DEFAULT_CACHE_BYTES
     fun dispose()
 
     companion object {
-        const val DEFAULT_CACHE_BYTES: Long = 150L * 1024 * 1024
+        /** 64 MB. Reader-page LRU — ±2 full-quality bitmaps around the visible page. */
+        const val DEFAULT_CACHE_BYTES: Long = 64L * 1024 * 1024
+
+        /** 12 MB. Thumbnail LRU — ~40 × 240-px previews; kept separate from the reader cache. */
+        const val DEFAULT_THUMBNAIL_CACHE_BYTES: Long = 12L * 1024 * 1024
     }
 }
 
 @Composable
 fun rememberPdfReaderState(
     cacheBytes: Long = PdfReaderState.DEFAULT_CACHE_BYTES,
+    thumbnailCacheBytes: Long = PdfReaderState.DEFAULT_THUMBNAIL_CACHE_BYTES,
 ): PdfReaderState
 ```
 
-The cache is a per-document LRU of `ImageBitmap`s keyed by
-`(pageIndex, quantized_width)`. Hits avoid re-rendering entirely. Adjust the
-byte budget via `rememberPdfReaderState(cacheBytes = …)`.
+The reader keeps two LRUs of `ImageBitmap`s keyed by
+`(pageIndex, quantized_width)`: one for full-quality reader pages, one for
+`PdfThumbnail` previews. Separating them means scrolling a 100-page thumbnail
+strip doesn't evict the reader's main-page bitmaps. Both budgets are tunable
+on `rememberPdfReaderState(...)`.
 
 ### `PdfPage`
 
@@ -288,21 +353,19 @@ screenH     = (top   - bottom) × scaleY
 ## Architecture
 
 ```
-                     :pdfium module
-┌─────────────────────────────────────────────────────────────┐
-│ commonMain                                                  │
-│   PdfReaderState  ─┐                                        │
-│   PdfPage         ─┼──► expect class PdfDocument            │
-│   PdfThumbnail    ─┘         │                              │
-│   PdfRenderCache            │                              │
-│   PageTextLayout            │                              │
-├──────────────────────────────┼──────────────────────────────┤
-│ jvmMain                     │   androidMain   │   iosMain   │
-│   JNI via shared C++ glue   │   JNI + NDK     │   cinterop  │
-│   (pdfium_jni.cpp)          │   AndroidBitmap │   to libpdfium
-│   Writes into Skia Bitmap   │   zero-copy     │   static lib
-│   pixel memory directly     │                 │             │
-└──────────────────────────────┴─────────────────┴─────────────┘
+                                    :pdfium module
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ commonMain                                                                   │
+│   PdfReaderState  ─┐                                                         │
+│   PdfPage         ─┼──► expect class PdfDocument                             │
+│   PdfThumbnail    ─┘                                                         │
+│   PdfRenderCache    PageTextLayout   textClipEntry (expect)                  │
+├──────────────────┬───────────────┬─────────────┬─────────────────────────────┤
+│ jvmMain          │ androidMain   │ iosMain     │ jsMain / wasmJsMain (web)   │
+│   JNI glue       │ JNI + NDK     │ cinterop    │ pdfium.wasm in a Web Worker │
+│   → Skia Bitmap  │ AndroidBitmap │ libpdfium.a │ RPC via postMessage,        │
+│   zero-copy      │ zero-copy     │ + Skia      │ transferable pixels → Skia  │
+└──────────────────┴───────────────┴─────────────┴─────────────────────────────┘
 ```
 
 Key facts:
@@ -412,10 +475,12 @@ if available.
   bounds match the line, and copied text is exact, but the highlight
   rectangles won't align glyph-for-glyph the way Chrome / PDF.js do when they
   can match an embedded PDF font.
-- **WASM / Web targets are not supported.** Earlier iterations targeted
-  wasmJs through bblanchon's emscripten build; the memory boundary between
-  `pdfium.wasm` and `skiko.wasm` prevents a zero-copy path and the approach
-  was dropped.
+- **Web: no zero-copy to Skia.** On wasmJs/JS, `pdfium.wasm` runs inside a
+  dedicated Web Worker (so the main thread never blocks). Pixels are posted
+  to the main thread via `postMessage` transferables and bulk-copied once
+  into a Skia `Bitmap` via `installPixels` — the only unavoidable copy
+  in the pipeline, since Skia has its own wasm heap with no direct
+  `ArrayBuffer` install.
 - **Licensing.** PDFium is dual-licensed BSD-3-Clause / Apache-2.0 (see
   PDFium's `LICENSE`). bblanchon's binaries carry that license forward. If
   you ship this code, include the upstream PDFium notices.
