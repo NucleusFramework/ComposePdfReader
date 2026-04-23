@@ -52,53 +52,12 @@ dependencyResolutionManagement {
 }
 ```
 
-### With a Gradle version catalog (`gradle/libs.versions.toml`)
-
-```toml
-[versions]
-pdfium-kt = "0.1.0"
-
-[libraries]
-pdfium-kt = { module = "dev.nucleusframework.pdf:pdfium", version.ref = "pdfium-kt" }
-```
-
 ```kotlin
 // app/build.gradle.kts
-kotlin {
-    sourceSets {
-        commonMain.dependencies {
-            implementation(libs.pdfium.kt)
-        }
-    }
-}
-```
-
-### Without a version catalog
-
-```kotlin
 kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation("dev.nucleusframework.pdf:pdfium:0.1.0")
-        }
-    }
-}
-```
-
-### Snapshot / local development
-
-Inside this monorepo, consume it as a typesafe project accessor:
-
-```kotlin
-// settings.gradle.kts
-enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
-include(":pdfium")
-
-// app/build.gradle.kts
-kotlin {
-    sourceSets {
-        commonMain.dependencies {
-            implementation(projects.pdfium)
         }
     }
 }
