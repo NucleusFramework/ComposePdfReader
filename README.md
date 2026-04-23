@@ -95,7 +95,7 @@ fun MyPdfViewer(bytes: ByteArray) {
 ```
 
 That is the whole integration: open a PDF, scroll through pages, select text
-with the mouse or long-press. The sample in `:composeApp` shows how to wire
+with the mouse or long-press. The sample in `:example` shows how to wire
 [FileKit](https://github.com/vinceglb/FileKit) for file picking, add a
 thumbnail sidebar, responsive layouts, and fit-width/height/page controls.
 
@@ -329,7 +329,7 @@ Key facts:
   `nOpenDocumentFromMemory` for the document handle. Closing the document
   frees the buffer.
 
-## Sample app (`:composeApp`)
+## Sample app (`:example`)
 
 The sample is a full PDF reader with:
 
@@ -344,7 +344,7 @@ The sample is a full PDF reader with:
 Source layout:
 
 ```
-composeApp/src/commonMain/kotlin/dev/nucleusframework/pdf/
+example/src/commonMain/kotlin/dev/nucleusframework/pdf/
 ├── App.kt                        ─ root composable, wires picker + screen
 ├── design/
 │   ├── Theme.kt                  ─ Palette / Typography / Shapes + LocalAppTheme
@@ -369,18 +369,18 @@ Run requirements: Gradle wrapper, JDK 17+, internet access on first build
 ### Desktop (JVM)
 
 ```
-./gradlew :composeApp:run
+./gradlew :example:run
 ```
 
 A native runtime image with modules is built by
-`./gradlew :composeApp:createDistributable` and runnable via
-`:composeApp:runDistributable`.
+`./gradlew :example:createDistributable` and runnable via
+`:example:runDistributable`.
 
 ### Android
 
 ```
-./gradlew :composeApp:assembleDebug
-./gradlew :composeApp:installDebug
+./gradlew :example:assembleDebug
+./gradlew :example:installDebug
 ```
 
 First-time Android builds also run `:pdfium:installPdfiumAndroidJniLibs` which

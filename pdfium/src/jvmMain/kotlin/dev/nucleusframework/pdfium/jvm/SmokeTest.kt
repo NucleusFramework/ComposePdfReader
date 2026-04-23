@@ -39,7 +39,7 @@ fun main(args: Array<String>) = runBlocking {
     val text = doc.pageText(0)
     println("[kotlin] page0 text length=${text.length} preview=${text.take(60).replace("\n", "⏎")}")
 
-    // Concurrency stress: fan out N parallel render+text+size calls, mirroring composeApp.
+    // Concurrency stress: fan out N parallel render+text+size calls, mirroring the sample app.
     println("[stress] launching 64 parallel render+text+size calls…")
     coroutineScope {
         repeat(64) {
