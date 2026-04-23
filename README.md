@@ -89,31 +89,326 @@ resolve against your webpack output directory. Remember to serve the site over
 HTTPS (or `localhost`): the Web Clipboard API used by text copy only works in
 secure contexts.
 
-## Quick start
+## Getting started — a tour
+
+Every snippet below is self-contained and drops straight into a Compose
+Multiplatform `commonMain` source set. Paste one, run, then move on to the
+next.
+
+### 1. Show a PDF in three lines of logic
 
 ```kotlin
 @Composable
-fun MyPdfViewer(bytes: ByteArray) {
-    val reader = rememberPdfReaderState()
-    LaunchedEffect(bytes) { reader.open(bytes) }
+fun HelloPdf(bytes: ByteArray) {
+    val reader = rememberPdfReaderState()       // state holder — dispatches on a background worker
+    LaunchedEffect(bytes) { reader.open(bytes) } // parses headers; cancels cleanly if `bytes` changes
+    PdfReader(state = reader, modifier = Modifier.fillMaxSize())
+}
+```
 
-    LazyColumn {
-        items(reader.pageCount) { pageIndex ->
-            PdfPage(
-                state = reader,
-                pageIndex = pageIndex,
-                modifier = Modifier.fillMaxWidth(),
-                selectableText = true,
-            )
+`PdfReader` is a vertical `LazyColumn` of pages with progressive rendering and
+a per-page LRU cache baked in. When the composable leaves composition,
+`rememberPdfReaderState` disposes the native handle automatically — no manual
+cleanup needed.
+
+### 2. Load the PDF bytes from somewhere real
+
+**From a platform-native file picker (recommended)** — use
+[FileKit](https://github.com/vinceglb/FileKit):
+
+```kotlin
+dependencies {
+    implementation("io.github.vinceglb:filekit-dialogs-compose:0.13.0")
+}
+```
+
+```kotlin
+@Composable
+fun PdfPicker() {
+    val reader = rememberPdfReaderState()
+    val scope = rememberCoroutineScope()
+    val picker = rememberFilePickerLauncher(
+        type = FileKitType.File(extensions = listOf("pdf")),
+    ) { file ->
+        if (file != null) scope.launch { reader.open(file.readBytes()) }
+    }
+    Column(Modifier.fillMaxSize()) {
+        Button(onClick = { picker.launch() }) { Text("Open PDF…") }
+        if (reader.pageCount > 0) {
+            PdfReader(state = reader, modifier = Modifier.fillMaxSize())
         }
     }
 }
 ```
 
-That is the whole integration: open a PDF, scroll through pages, select text
-with the mouse or long-press. The sample in `:example` shows how to wire
-[FileKit](https://github.com/vinceglb/FileKit) for file picking, add a
-thumbnail sidebar, responsive layouts, and fit-width/height/page controls.
+**From a URL** — use any HTTP client (Ktor here):
+
+```kotlin
+val client = remember { HttpClient() }
+LaunchedEffect(url) {
+    reader.open(client.get(url).readRawBytes())
+}
+```
+
+**From a classpath resource** — use Compose Resources or your platform's
+bundled-asset API. The library only needs a `ByteArray`; how you obtain it is
+up to you.
+
+### 3. React to loading state, metadata, and errors
+
+`PdfReaderState` exposes snapshot state you can observe in any composable:
+
+```kotlin
+Box(Modifier.fillMaxSize()) {
+    when {
+        reader.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+
+        reader.error is PdfError.PasswordRequired -> PasswordPrompt { password ->
+            scope.launch { reader.open(bytes, password) }
+        }
+        reader.error is PdfError.InvalidFormat -> Text("Not a valid PDF")
+        reader.error is PdfError.Io -> Text("Couldn't read file: ${reader.error?.message}")
+        reader.error is PdfError.NativeFailure -> Text("Render error: ${reader.error?.message}")
+
+        reader.pageCount > 0 -> {
+            Column {
+                Text(reader.metadata.title ?: "Untitled",
+                    style = MaterialTheme.typography.titleLarge)
+                Text("by ${reader.metadata.author ?: "Unknown"} — ${reader.pageCount} pages")
+                PdfReader(state = reader, modifier = Modifier.weight(1f))
+            }
+        }
+    }
+}
+```
+
+### 4. Enable copy/paste and text selection
+
+Flip one flag on `PdfPage` and a pixel-precise selection overlay lights up.
+Drag on desktop, long-press on mobile, Ctrl/Cmd+C to copy:
+
+```kotlin
+PdfPage(
+    state = reader,
+    pageIndex = pageIndex,
+    modifier = Modifier.fillMaxWidth(),
+    selectableText = true,   // 👈 all you need
+)
+```
+
+The overlay routes hit-testing through PDFium's per-character bounding boxes
+(`FPDFText_GetCharBox`), not Compose's own font metrics, so selection
+follows the rendered glyphs pixel-for-pixel.
+
+### 5. Extract text programmatically
+
+Grab the full Unicode of a single page:
+
+```kotlin
+val scope = rememberCoroutineScope()
+scope.launch {
+    val text = reader.pageText(pageIndex = 0)
+    println(text)
+}
+```
+
+Concatenate the whole document:
+
+```kotlin
+suspend fun dumpPdf(reader: PdfReaderState): String =
+    (0 until reader.pageCount).joinToString("\n\n") { reader.pageText(it) }
+```
+
+### 6. Search across pages and highlight hits
+
+`pageTextLayout` returns line-level rectangles with their Unicode run — all
+you need for a search-in-document feature:
+
+```kotlin
+data class SearchHit(val page: Int, val rect: Rect, val text: String)
+
+suspend fun search(reader: PdfReaderState, query: String): List<SearchHit> {
+    if (query.length < 2) return emptyList()
+    return buildList {
+        for (page in 0 until reader.pageCount) {
+            val layout = reader.pageTextLayout(page) ?: continue
+            for (i in 0 until layout.rectCount) {
+                val run = layout.text(i)
+                if (run.contains(query, ignoreCase = true)) {
+                    // PDF origin is bottom-left; flip Y to Compose top-left.
+                    val pageH = layout.pageSize.heightPoints
+                    val rect = Rect(
+                        left = layout.left(i),
+                        top = pageH - layout.top(i),
+                        right = layout.right(i),
+                        bottom = pageH - layout.bottom(i),
+                    )
+                    add(SearchHit(page = page, rect = rect, text = run))
+                }
+            }
+        }
+    }
+}
+```
+
+Turn each `SearchHit.rect` (in PDF points) into on-screen pixels with the
+scale formula in the [PageTextLayout coordinate guide](#pagetextlayout).
+
+### 7. Draw your own overlay on top of a page
+
+Want to highlight the current search hit, sign a form, or stamp a
+watermark? Wrap `PdfPage` in a `Box`, lay a `Canvas` over it, and convert
+your PDF-point geometry:
+
+```kotlin
+@Composable
+fun HighlightedPage(reader: PdfReaderState, pageIndex: Int, hits: List<Rect>) {
+    var pageSize by remember { mutableStateOf<PageSize?>(null) }
+    LaunchedEffect(pageIndex) { pageSize = reader.pageSize(pageIndex) }
+
+    Box(Modifier.fillMaxWidth()) {
+        PdfPage(reader, pageIndex, selectableText = true)
+        val size = pageSize ?: return@Box
+        Canvas(Modifier.matchParentSize()) {
+            val sx = this.size.width  / size.widthPoints
+            val sy = this.size.height / size.heightPoints
+            hits.forEach { r ->
+                drawRect(
+                    color = Color(0x665AB1FF),
+                    topLeft = Offset(r.left * sx, r.top * sy),
+                    size = Size((r.right - r.left) * sx, (r.bottom - r.top) * sy),
+                )
+            }
+        }
+    }
+}
+```
+
+### 8. Add a thumbnail sidebar
+
+`PdfThumbnail` uses `RenderQuality.PREVIEW` and its own LRU, so scrolling a
+hundred-page strip never evicts your reader's full-quality bitmaps:
+
+```kotlin
+Row(Modifier.fillMaxSize()) {
+    LazyColumn(
+        modifier = Modifier.width(160.dp).fillMaxHeight(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(8.dp),
+    ) {
+        items(reader.pageCount) { i ->
+            PdfThumbnail(
+                state = reader,
+                pageIndex = i,
+                modifier = Modifier.clickable { /* jumpToPage(i) */ },
+            )
+        }
+    }
+    PdfReader(state = reader, modifier = Modifier.weight(1f).fillMaxHeight())
+}
+```
+
+### 9. Zoom, fit-to-width, fit-to-page
+
+`PdfReaderState.renderScale` is a plain `Float` — every `PdfPage` observes
+it, so flipping it re-renders the visible pages at the new size.
+
+```kotlin
+var scale by remember { mutableStateOf(1f) }
+LaunchedEffect(scale) { reader.renderScale = scale }
+
+Column {
+    Slider(value = scale, onValueChange = { scale = it }, valueRange = 0.5f..3f)
+    Row {
+        TextButton(onClick = { scale = 1f }) { Text("Fit width") }
+        TextButton(onClick = {
+            // Maths in ReaderScreenState.kt — 3 lines with the viewport size.
+            val vp = viewportPx ; val page = reader.pageSize(0) ?: return@TextButton
+            scale = (vp.height * page.aspectRatio / vp.width).coerceIn(0.1f, 4f)
+        }) { Text("Fit height") }
+    }
+}
+```
+
+> Looking for a ready-made zoom UI? The sample's
+> [`ReaderTopBar.kt`](example/src/commonMain/kotlin/dev/nucleusframework/pdf/reader/ReaderTopBar.kt)
+> wires a Material slider + Fit Width / Height / Page buttons you can copy
+> as-is.
+
+### 10. Add a right-click / long-press context menu
+
+On desktop, the built-in `ContextMenuArea` works out of the box. Wrap any
+page-level composable:
+
+```kotlin
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PageWithMenu(reader: PdfReaderState, pageIndex: Int) {
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboard.current
+
+    ContextMenuArea(items = {
+        listOf(
+            ContextMenuItem("Copy page text") {
+                scope.launch {
+                    val text = reader.pageText(pageIndex)
+                    clipboard.setClipEntry(textClipEntry(text))
+                }
+            },
+            ContextMenuItem("Jump to next page") {
+                // your own state holder decides how to advance
+            },
+        )
+    }) {
+        PdfPage(reader, pageIndex, selectableText = true)
+    }
+}
+```
+
+`textClipEntry(text)` is the lib's own cross-platform helper for the new
+Compose `Clipboard.setClipEntry(...)` API (Compose 1.10 deprecated
+`ClipboardManager.setText` — this covers the gap).
+
+On Android/iOS, `ContextMenuArea` doesn't exist; detect long-press yourself:
+
+```kotlin
+Box(
+    Modifier.pointerInput(pageIndex) {
+        detectTapGestures(
+            onLongPress = { showMenu = true },
+        )
+    }
+) { PdfPage(reader, pageIndex) }
+```
+
+### 11. Password-protected PDFs
+
+Pass the password on `open`:
+
+```kotlin
+reader.open(bytes, password = "hunter2")
+```
+
+If you don't have it yet, `reader.error` will transition to
+`PdfError.PasswordRequired` — prompt the user, then re-call `open`:
+
+```kotlin
+var pending by remember { mutableStateOf<ByteArray?>(null) }
+LaunchedEffect(bytes) { pending = bytes ; reader.open(bytes) }
+
+if (reader.error is PdfError.PasswordRequired && pending != null) {
+    PasswordDialog(onSubmit = { pw ->
+        scope.launch { reader.open(pending!!, password = pw) }
+    })
+}
+```
+
+### What next?
+
+- The full reader screen (`:example`) wires picker + sidebar + zoom + toast
+  in < 500 lines — a real reference for building on top of this library.
+- The [API reference](#api-reference) below documents every public symbol
+  with its types, defaults, and invariants.
 
 ## API reference
 
