@@ -64,7 +64,7 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
-        wasmJsMain.dependencies {
+        webMain.dependencies {
             implementation(libs.kotlinx.browser)
         }
         jvmMain.dependencies {
@@ -116,7 +116,7 @@ dependencies {
 // and pdfium.wasm. We copy the trio flat into composeApp's incremental sync dir (next
 // to composeApp.mjs) so `@JsModule("./pdfium_glue.mjs")` resolves against it — the same
 // layout kotlin-wasm-examples/browser-c-interop uses for its own .mjs/.wasm pair.
-val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/wasmJsMain/resources/pdfium")
+val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/webMain/resources/pdfium")
 
 // The compile-sync task is destructive: it mirrors its declared inputs into the webpack
 // package dir and deletes anything else. So we run our copy *after* the sync finishes,

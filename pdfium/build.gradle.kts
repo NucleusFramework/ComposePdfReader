@@ -127,7 +127,7 @@ kotlin {
         }
         androidMain.dependencies { implementation(libs.kotlinx.coroutinesAndroid) }
         jvmMain.dependencies { implementation(libs.kotlinx.coroutinesSwing) }
-        wasmJsMain.dependencies {
+        webMain.dependencies {
             implementation(libs.kotlinx.browser)
         }
     }
@@ -329,7 +329,7 @@ abstract class InstallIosTask : DefaultTask() {
 val nativeJniResourceDir = layout.projectDirectory.dir("src/jvmMain/resources/pdfium/native")
 val androidJniLibsDir = layout.projectDirectory.dir("src/androidMain/jniLibs")
 val iosStaticLibsDir = layout.projectDirectory.dir("src/nativeInterop/libs")
-val wasmResourceDir = layout.projectDirectory.dir("src/wasmJsMain/resources/pdfium")
+val wasmResourceDir = layout.projectDirectory.dir("src/webMain/resources/pdfium")
 val stagedHeadersDir = layout.buildDirectory.dir("pdfium/include")
 
 fun extractedDir(archive: String) = pdfiumExtractDir.map { it.dir(archive) }
