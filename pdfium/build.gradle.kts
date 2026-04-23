@@ -93,6 +93,13 @@ kotlin {
 
     jvm()
 
+    js {
+        browser {
+            // Karma pulls from github.com and fails SSL on some hosts; we run no JS tests.
+            testTask { enabled = false }
+        }
+    }
+
     wasmJs {
         browser()
         compilerOptions {
@@ -127,9 +134,6 @@ kotlin {
         }
         androidMain.dependencies { implementation(libs.kotlinx.coroutinesAndroid) }
         jvmMain.dependencies { implementation(libs.kotlinx.coroutinesSwing) }
-        webMain.dependencies {
-            implementation(libs.kotlinx.browser)
-        }
     }
 }
 

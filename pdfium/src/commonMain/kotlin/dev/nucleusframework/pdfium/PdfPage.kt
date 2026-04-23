@@ -16,6 +16,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -38,9 +39,8 @@ import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.max
 import kotlin.math.min
@@ -50,6 +50,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.launch
 
 /**
  * Render a PDF page with a progressive two-tier strategy (preview → full) and an optional
@@ -161,7 +162,8 @@ fun PdfPage(
  */
 @Composable
 private fun TextSelectionLayer(layout: PageTextLayout, modifier: Modifier = Modifier) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val focusRequester = remember(layout) { FocusRequester() }
     var anchorPos by remember(layout) { mutableStateOf(-1) }
     var cursorPos by remember(layout) { mutableStateOf(-1) }
@@ -192,7 +194,9 @@ private fun TextSelectionLayer(layout: PageTextLayout, modifier: Modifier = Modi
                             val b = cursorPos
                             if (a >= 0 && b >= 0) {
                                 val text = buildSelectedText(layout, order, min(a, b), max(a, b))
-                                if (text.isNotEmpty()) clipboard.setText(AnnotatedString(text))
+                                if (text.isNotEmpty()) {
+                                    scope.launch { clipboard.setClipEntry(textClipEntry(text)) }
+                                }
                             }
                             true
                         }

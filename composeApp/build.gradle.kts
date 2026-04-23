@@ -33,6 +33,20 @@ kotlin {
 
     jvm()
 
+    js {
+        outputModuleName.set("composeApp")
+        browser {
+            commonWebpackConfig {
+                outputFileName = "composeApp.js"
+            }
+            // Disable karma-based tests: karma is fetched from github.com at NPM-install
+            // time and fails on hosts with restricted CA stores. We don't run browser
+            // tests for composeApp anyway.
+            testTask { enabled = false }
+        }
+        binaries.executable()
+    }
+
     wasmJs {
         outputModuleName.set("composeApp")
         browser {
@@ -118,52 +132,53 @@ dependencies {
 // layout kotlin-wasm-examples/browser-c-interop uses for its own .mjs/.wasm pair.
 val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/webMain/resources/pdfium")
 
-// The compile-sync task is destructive: it mirrors its declared inputs into the webpack
-// package dir and deletes anything else. So we run our copy *after* the sync finishes,
-// via `finalizedBy`, and have the Webpack task depend on the copy — this way pdfium_glue
-// (plus sibling .mjs/.wasm assets) land next to composeApp.mjs before webpack resolves
-// `@JsModule("./pdfium_glue.mjs")`.
-val syncTaskName = if (project.hasProperty("isProduction")
+val isProductionWeb = project.hasProperty("isProduction")
     || project.gradle.startParameter.taskNames.any { it.endsWith("Distribution") }
-) {
-    "wasmJsProductionExecutableCompileSync"
-} else {
-    "wasmJsDevelopmentExecutableCompileSync"
-}
 
-val copyPdfiumWasmAssets by tasks.registering(Copy::class) {
-    dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
-    from(pdfiumWasmDir) {
-        include("pdfium_glue.mjs", "pdfium_runtime.mjs", "pdfium_worker.mjs", "pdfium.wasm")
+// wasmJs and js each have their own compile-sync task (destructive: it mirrors its
+// declared inputs into the webpack package dir and deletes anything else). Register one
+// copy task per target that runs `finalizedBy` the sync — that way pdfium_glue (plus
+// sibling .mjs/.wasm assets) lands next to composeApp.mjs before webpack resolves
+// `@JsModule("./pdfium_glue.mjs")`.
+val webTargets = listOf("wasmJs", "js")
+
+webTargets.forEach { target ->
+    val syncTaskName = if (isProductionWeb) {
+        "${target}ProductionExecutableCompileSync"
+    } else {
+        "${target}DevelopmentExecutableCompileSync"
     }
-    into(tasks.named<DefaultIncrementalSyncTask>(syncTaskName).flatMap { it.destinationDirectory })
-}
+    val copyAssets = tasks.register<Copy>("copyPdfium${target.replaceFirstChar { it.uppercase() }}Assets") {
+        dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
+        from(pdfiumWasmDir) {
+            include("pdfium_glue.mjs", "pdfium_runtime.mjs", "pdfium_worker.mjs", "pdfium.wasm")
+        }
+        into(tasks.named<DefaultIncrementalSyncTask>(syncTaskName).flatMap { it.destinationDirectory })
+    }
+    tasks.named(syncTaskName) { finalizedBy(copyAssets) }
+    tasks.matching {
+        it.name in setOf(
+            "${target}BrowserDevelopmentWebpack",
+            "${target}BrowserProductionWebpack",
+            "${target}BrowserDevelopmentRun",
+            "${target}BrowserProductionRun",
+        )
+    }.configureEach { dependsOn(copyAssets) }
 
-tasks.named(syncTaskName) { finalizedBy(copyPdfiumWasmAssets) }
-
-tasks.matching {
-    it.name in setOf(
-        "wasmJsBrowserDevelopmentWebpack",
-        "wasmJsBrowserProductionWebpack",
-        "wasmJsBrowserDevelopmentRun",
-        "wasmJsBrowserProductionRun",
-    )
-}.configureEach { dependsOn(copyPdfiumWasmAssets) }
-
-// Webpack bundles pdfium_glue.mjs and pdfium_runtime.mjs into composeApp.js via their
-// ES imports, but pdfium_worker.mjs is loaded at runtime via `new Worker(urlString)` —
-// webpack can't statically see the reference, so it doesn't bundle the worker. Same
-// for pdfium.wasm, which Emscripten fetches at runtime. Both must be served as static
-// files next to the bundle, so we copy them into processedResources (picked up by the
-// dev server and the final dist).
-val copyPdfiumWasmToResources by tasks.registering(Copy::class) {
-    dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
-    from(pdfiumWasmDir) { include("pdfium.wasm", "pdfium_worker.mjs", "pdfium_runtime.mjs") }
-    into(layout.buildDirectory.dir("processedResources/wasmJs/main"))
-}
-
-tasks.matching { it.name == "wasmJsProcessResources" }.configureEach {
-    dependsOn(copyPdfiumWasmToResources)
+    // Webpack bundles pdfium_glue.mjs and pdfium_runtime.mjs into composeApp.js via their
+    // ES imports, but pdfium_worker.mjs is loaded at runtime via `new Worker(urlString)` —
+    // webpack can't statically see the reference, so it doesn't bundle the worker. Same
+    // for pdfium.wasm, which Emscripten fetches at runtime. Both must be served as static
+    // files next to the bundle, so we copy them into processedResources (picked up by the
+    // dev server and the final dist).
+    val copyToResources = tasks.register<Copy>("copyPdfium${target.replaceFirstChar { it.uppercase() }}ToResources") {
+        dependsOn(":pdfium:installPdfiumWasm", ":pdfium:generatePdfiumWasmRuntime")
+        from(pdfiumWasmDir) { include("pdfium.wasm", "pdfium_worker.mjs", "pdfium_runtime.mjs") }
+        into(layout.buildDirectory.dir("processedResources/$target/main"))
+    }
+    tasks.matching { it.name == "${target}ProcessResources" }.configureEach {
+        dependsOn(copyToResources)
+    }
 }
 
 // Nucleus handles packaging, native distributions and GraalVM native-image.

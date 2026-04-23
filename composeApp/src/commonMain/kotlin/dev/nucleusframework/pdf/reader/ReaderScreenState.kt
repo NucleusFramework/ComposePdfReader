@@ -10,12 +10,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.ClipboardManager
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.Clipboard
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.unit.IntSize
 import dev.nucleusframework.pdfium.PdfReaderState
 import dev.nucleusframework.pdfium.rememberPdfReaderState
+import dev.nucleusframework.pdfium.textClipEntry
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -41,7 +41,7 @@ class ReaderScreenState internal constructor(
     val mainListState: LazyListState,
     val thumbListState: LazyListState,
     private val scope: CoroutineScope,
-    private val clipboard: ClipboardManager,
+    private val clipboard: Clipboard,
 ) {
     var fileName: String? by mutableStateOf(null)
         private set
@@ -126,7 +126,7 @@ class ReaderScreenState internal constructor(
             toast = if (text.isEmpty()) {
                 "Page ${index + 1} has no extractable text"
             } else {
-                clipboard.setText(AnnotatedString(text))
+                clipboard.setClipEntry(textClipEntry(text))
                 "Page ${index + 1} text copied"
             }
         }
@@ -180,7 +180,7 @@ class ReaderScreenState internal constructor(
     }
 
     fun copyAndDismissText(text: String) {
-        clipboard.setText(AnnotatedString(text))
+        scope.launch { clipboard.setClipEntry(textClipEntry(text)) }
         textDialogPage = null
         toast = "Text copied"
     }
@@ -197,7 +197,7 @@ fun rememberReaderScreenState(): ReaderScreenState {
     val mainListState = rememberLazyListState()
     val thumbListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
     return remember(reader, scope, clipboard) {
         ReaderScreenState(reader, mainListState, thumbListState, scope, clipboard)
     }

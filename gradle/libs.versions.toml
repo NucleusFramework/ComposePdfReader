@@ -21,7 +21,7 @@ okio = "3.9.1"
 filekit = "0.13.0"
 composeUnstyled = "1.49.6"
 nucleus = "1.14.1"
-kotlinx-browser = "0.3"
+kotlinx-browser = "0.5.0"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
