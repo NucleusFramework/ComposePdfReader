@@ -20,3 +20,12 @@ node_modules/
 *.so
 *.dylib
 *.dll
+
+# PDFium wasm artefacts staged by the :pdfium:installPdfiumWasm and
+# :pdfium:generatePdfiumWasmRuntime Gradle tasks (source is the bblanchon
+# pdfium-wasm tarball downloaded at build time). Regenerated on every build.
+pdfium/src/webMain/resources/pdfium/pdfium.wasm
+pdfium/src/webMain/resources/pdfium/pdfium.js
+
+# Root-level test PDFs.
+/*.pdf
