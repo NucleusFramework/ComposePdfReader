@@ -1,4 +1,4 @@
-rootProject.name = "pdf"
+rootProject.name = "ComposePdf"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {

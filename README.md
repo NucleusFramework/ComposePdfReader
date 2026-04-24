@@ -1,25 +1,24 @@
-# PdfiumKt
+# ComposePdf
 
 A Kotlin Multiplatform PDF rendering and text-extraction library built on top of
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) and
-Compose Multiplatform. Ships a zero-copy render pipeline, a Compose-first API,
-and a sample desktop/mobile reader with thumbnails, progressive rendering, and
-selectable text.
+Compose Multiplatform. Zero-copy render pipeline on JVM / Android / iOS (Web
+posts pixels from a worker), a Compose-first API, and a sample desktop/mobile
+reader with thumbnails, progressive rendering, and selectable text.
 
 ## Features
 
 - **Compose Multiplatform composables** — drop `PdfPage` or `PdfThumbnail` into
   any Compose UI.
 - **Zero-copy rendering** on JVM / Android / iOS: PDFium writes directly into
-  Skia / Android `Bitmap` pixel memory — no intermediate `ByteArray` or
-  `ByteBuffer` copies.
+  Skia / Android `Bitmap` pixel memory.
 - **Progressive rendering** (preview → full) with a debounced size flow, so
   scroll and zoom feel instant.
-- **Per-document render cache** (LRU, budget-limited) and off-screen prefetch.
+- **Two-tier LRU cache** (reader bitmaps + thumbnails) with off-screen prefetch.
 - **Text extraction** — per-page UTF-8 text, line-level rectangles, and
   per-character bounding boxes.
-- **Selectable text overlay** built on `SelectionContainer` so Ctrl+C and
-  long-press copy return the exact PDF text.
+- **Selectable text overlay** driven by PDFium's per-character boxes, so Ctrl+C
+  and long-press copy return the exact PDF text.
 - **Cross-platform fit/zoom controls** via a plain state holder.
 
 ## Supported targets
@@ -40,20 +39,8 @@ bblanchon's GitHub releases (pinned in `gradle/libs.versions.toml` →
 Published to Maven Central. Requires Gradle 8.10+ and Kotlin 2.3.20+. The
 `:pdfium` module uses a JVM toolchain of 17.
 
-Add the Maven Central repository and the dependency:
-
 ```kotlin
-// settings.gradle.kts
-dependencyResolutionManagement {
-    repositories {
-        mavenCentral()
-        google()
-    }
-}
-```
-
-```kotlin
-// app/build.gradle.kts
+// build.gradle.kts
 kotlin {
     sourceSets {
         commonMain.dependencies {
@@ -106,10 +93,8 @@ fun HelloPdf(bytes: ByteArray) {
 }
 ```
 
-`PdfReader` is a vertical `LazyColumn` of pages with progressive rendering and
-a per-page LRU cache baked in. When the composable leaves composition,
-`rememberPdfReaderState` disposes the native handle automatically — no manual
-cleanup needed.
+`PdfReader` stacks every page in a `LazyColumn`. `rememberPdfReaderState`
+disposes native handles automatically when it leaves composition.
 
 ### 2. Load the PDF bytes from somewhere real
 
@@ -196,9 +181,8 @@ PdfPage(
 )
 ```
 
-The overlay routes hit-testing through PDFium's per-character bounding boxes
-(`FPDFText_GetCharBox`), not Compose's own font metrics, so selection
-follows the rendered glyphs pixel-for-pixel.
+Hit-testing uses PDFium's per-character boxes (`FPDFText_GetCharBox`) rather
+than Compose's own font metrics, so selection tracks the rendered glyphs.
 
 ### 5. Extract text programmatically
 
@@ -458,11 +442,8 @@ fun rememberPdfReaderState(
 ): PdfReaderState
 ```
 
-The reader keeps two LRUs of `ImageBitmap`s keyed by
-`(pageIndex, quantized_width)`: one for full-quality reader pages, one for
-`PdfThumbnail` previews. Separating them means scrolling a 100-page thumbnail
-strip doesn't evict the reader's main-page bitmaps. Both budgets are tunable
-on `rememberPdfReaderState(...)`.
+Bitmaps are keyed by `(pageIndex, quantized_width)`; both cache budgets are
+tunable on `rememberPdfReaderState(...)`.
 
 ### `PdfPage`
 
@@ -484,10 +465,8 @@ fun PdfPage(
 
 - `modifier` controls the layout width; the composable derives the aspect
   ratio from the PDF page and sets its own height.
-- `selectableText = true` overlays a transparent, selectable text layer on top
-  of the bitmap so the user can drag-select and copy. The overlay uses per-text
-  rectangles extracted via PDFium's `FPDFText_GetRect`. Copy returns the exact
-  Unicode reported by PDFium.
+- `selectableText = true` enables the pointer-driven selection overlay
+  described in [step 4](#4-enable-copypaste-and-text-selection).
 
 ### `PdfThumbnail`
 
@@ -724,11 +703,10 @@ if available.
 
 - **No cross-process parallel rendering.** PDFium + FreeType is effectively
   single-threaded per process. Rendering is serialised inside each document.
-- **Selection text precision.** The overlay uses PDFium's line-level
-  rectangles, not per-glyph positioning with the original PDF font. Selection
-  bounds match the line, and copied text is exact, but the highlight
-  rectangles won't align glyph-for-glyph the way Chrome / PDF.js do when they
-  can match an embedded PDF font.
+- **Selection text precision.** The overlay uses PDFium's per-character
+  bounding boxes, not glyph positioning from the embedded PDF font. Copied
+  text is exact, but highlight rectangles can differ slightly from what
+  Chrome / PDF.js render when they can access the original font metrics.
 - **Web: no zero-copy to Skia.** On wasmJs/JS, `pdfium.wasm` runs inside a
   dedicated Web Worker (so the main thread never blocks). Pixels are posted
   to the main thread via `postMessage` transferables and bulk-copied once
