@@ -1,27 +1,25 @@
+@file:OptIn(ExperimentalWasmJsInterop::class)
+
 package dev.nucleusframework.pdfium
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asComposeImageBitmap
-import kotlinx.coroutines.await
+import kotlin.js.ExperimentalWasmJsInterop
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ColorAlphaType
+import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
-import org.khronos.webgl.Int8Array
-import org.khronos.webgl.toByteArray
-import org.khronos.webgl.toFloatArray
-import org.khronos.webgl.toInt8Array
-import org.khronos.webgl.toIntArray
 
 /**
- * wasmJs PDF document. pdfium.wasm runs inside a dedicated Web Worker (spawned by
- * `pdfium_glue.mjs`) so the browser's main thread stays free to paint frames while a
- * render is in flight. Everything here is just a thin [await] bridge from Kotlin
- * suspension onto the RPC promises the worker returns.
+ * Shared web (js + wasmJs) `PdfDocument` actual. pdfium.wasm runs inside a dedicated
+ * Web Worker (spawned by `pdfium_glue.mjs`) so the browser's main thread stays free to
+ * paint frames while a render is in flight. Everything here is just a thin
+ * [awaitTyped] bridge from Kotlin suspension onto the RPC promises the worker returns.
  *
- * The only unavoidable main-thread copy happens inside [renderPage]: the worker's
- * pixel `ArrayBuffer` arrives transferred (zero-copy), then we bulk-copy once into a
- * Kotlin [ByteArray] for Skiko's `installPixels` (Skia has its own wasm heap and
- * exposes no ArrayBuffer-direct install on this Skiko version).
+ * Rendered pixel buffers arrive as transferred [org.khronos.webgl.ArrayBuffer]s and are
+ * written straight into Skia's wasm linear memory via [passToSkiko] — no intermediate
+ * Kotlin [ByteArray]. Platform-specific typed-array bridges live in
+ * [WebTypedArrayBridge].
  */
 internal actual class PdfDocument internal constructor(
     private val docPtr: Int,
@@ -29,7 +27,7 @@ internal actual class PdfDocument internal constructor(
     actual val metadata: PdfMetadata,
 ) {
     actual suspend fun pageSize(pageIndex: Int): PageSize {
-        val r = pageSize(docPtr, pageIndex).await<PageSizeResult>()
+        val r = pageSize(docPtr, pageIndex).awaitTyped<PageSizeResult>()
         return PageSize(r.widthPoints, r.heightPoints)
     }
 
@@ -39,26 +37,24 @@ internal actual class PdfDocument internal constructor(
         heightPx: Int,
         quality: RenderQuality,
     ): ImageBitmap {
-        val r = renderPage(docPtr, pageIndex, widthPx, heightPx, quality.toFlags()).await<RenderResult>()
+        val r = renderPage(docPtr, pageIndex, widthPx, heightPx, quality.toFlags()).awaitTyped<RenderResult>()
         // pdfium writes BGRA, matching Skia's native N32 colour type on wasm — no swizzle.
-        val pixels = Int8Array(r.pixels).toByteArray()
+        val skikoData = r.pixels.passToSkiko()
         val info = ImageInfo.makeN32(widthPx, heightPx, ColorAlphaType.PREMUL)
-        val bitmap = Bitmap()
-        val installed = bitmap.installPixels(info, pixels, widthPx * 4)
-        check(installed) { "Skia installPixels returned false" }
-        return bitmap.asComposeImageBitmap()
+        val image = Image.makeRaster(info, skikoData, widthPx * 4)
+        return Bitmap.makeFromImage(image).asComposeImageBitmap()
     }
 
     actual suspend fun pageText(pageIndex: Int): String =
-        pageText(docPtr, pageIndex).await<TextResult>().text
+        pageText(docPtr, pageIndex).awaitTyped<TextResult>().text
 
     actual suspend fun pageTextLayout(pageIndex: Int): PageTextLayout {
-        val r = pageTextLayout(docPtr, pageIndex).await<TextLayoutResult>()
+        val r = pageTextLayout(docPtr, pageIndex).awaitTyped<TextLayoutResult>()
         val size = PageSize(r.widthPoints, r.heightPoints)
-        val rectBoxes = r.rectBoxes.toFloatArray()
+        val rectBoxes = r.rectBoxes.toSharedFloatArray()
         val rectTexts = Array(r.rectTexts.length) { i -> r.rectTexts[i]?.toString().orEmpty() }
-        val charCodepoints = r.charCodepoints.toIntArray()
-        val charBoxes = r.charBoxes.toFloatArray()
+        val charCodepoints = r.charCodepoints.toSharedIntArray()
+        val charBoxes = r.charBoxes.toSharedFloatArray()
         return PageTextLayout(pageIndex, size, rectBoxes, rectTexts, charCodepoints, charBoxes)
     }
 
@@ -78,10 +74,11 @@ internal actual class PdfDocument internal constructor(
 }
 
 internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?): PdfDocument {
-    // Move the PDF bytes into a JS ArrayBuffer (bulk copy) and transfer ownership to
-    // the worker — the main thread has no further use for them.
-    val buffer = bytes.toInt8Array().buffer
-    val r = openDocument(buffer, password).await<OpenResult>()
+    // On wasmJs this is a bulk copy into a JS ArrayBuffer, on jsMain it's a zero-copy
+    // reinterpretation (ByteArray IS Int8Array). Either way we transfer ownership to
+    // the worker — the main thread has no further use for the bytes.
+    val buffer = bytes.toJsArrayBuffer()
+    val r = openDocument(buffer, password).awaitTyped<OpenResult>()
     return PdfDocument(
         docPtr = r.doc,
         pageCount = r.pageCount,

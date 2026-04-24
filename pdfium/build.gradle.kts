@@ -101,6 +101,10 @@ kotlin {
     jvm()
 
     js {
+        // ES-module output so a single `@file:JsModule("./pdfium_glue.mjs")` declaration
+        // (shared with wasmJs in webMain) works without a jsMain-only `@JsNonModule`
+        // companion annotation.
+        useEsModules()
         browser {
             // Karma pulls from github.com and fails SSL on some hosts; we run no JS tests.
             testTask { enabled = false }
