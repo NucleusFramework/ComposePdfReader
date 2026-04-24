@@ -1,0 +1,151 @@
+name: Release GraalVM Native Image (Example Desktop App)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-graalvm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-natives:
+    uses: ./.github/workflows/build-natives.yaml
+
+  build:
+    needs: build-natives
+    name: GraalVM - ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            arch: amd64
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            arch: arm64
+          - name: macOS ARM64
+            os: macos-latest
+            arch: arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            arch: amd64
+          - name: Windows x64
+            os: windows-latest
+            arch: amd64
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download PDFium JNI natives
+        uses: actions/download-artifact@v4
+        with:
+          path: pdfium/src/jvmMain/resources/pdfium/native/
+          pattern: 'pdfium-jni-*'
+          merge-multiple: true
+
+      - name: Select Xcode 26 (macOS)
+        if: runner.os == 'macOS'
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
+
+      - name: Setup Liberica NIK (GraalVM)
+        uses: graalvm/setup-graalvm@v1
+        with:
+          distribution: 'liberica'
+          java-version: '25'
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Android SDK (Linux ARM64)
+        if: matrix.os == 'ubuntu-24.04-arm'
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build GraalVM native package
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)   TASK=packageGraalvmDeb  ;;
+            macOS)   TASK=packageGraalvmDmg  ;;
+            Windows) TASK=packageGraalvmNsis ;;
+          esac
+          ./gradlew ":example:$TASK" -PnativeMarch=compatibility --no-daemon --stacktrace
+
+      - name: Upload GraalVM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: graalvm-${{ runner.os }}-${{ matrix.arch }}
+          path: |
+            example/build/compose/binaries/**/graalvm-*/**
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download all GraalVM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: graalvm-*
+
+      - name: Determine version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          if [[ "$VERSION" == *"-alpha"* ]] || [[ "$VERSION" == *"-beta"* ]]; then
+            echo "PRERELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "PRERELEASE=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.deb' -o -name '*.dmg' -o -name '*.exe' \) -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Upload to GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if [ -z "$(ls -A release-assets/)" ]; then
+            echo "::error::No release assets found"
+            exit 1
+          fi
+          if ! gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            ARGS=(release create "$TAG" --title "$TAG" --generate-notes -R "$REPO")
+            if [ "$PRERELEASE" = "true" ]; then
+              ARGS+=(--prerelease)
+            fi
+            gh "${ARGS[@]}"
+          fi
+          gh release upload "$TAG" release-assets/* --clobber -R "$REPO"

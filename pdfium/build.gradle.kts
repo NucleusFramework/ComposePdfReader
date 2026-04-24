@@ -32,7 +32,7 @@ val publishVersion: String =
         ?.removePrefix("refs/tags/v")
         ?: "0.1.0"
 
-group = "dev.nucleusframework.pdf"
+group = "dev.nucleusframework"
 version = publishVersion
 
 val pdfiumVersion = libs.versions.pdfium.bblanchon.get()
@@ -564,7 +564,7 @@ tasks.register<JavaExec>("smokeTest") {
 // ---------- Maven Central publication ----------
 
 mavenPublishing {
-    coordinates("dev.nucleusframework.pdf", "pdfium", publishVersion)
+    coordinates("dev.nucleusframework", "pdfium", publishVersion)
 
     pom {
         name.set("Nucleus PDF — PDFium")
