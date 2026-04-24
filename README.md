@@ -49,7 +49,7 @@ Published to Maven Central. Requires Gradle 8.10+ and Kotlin 2.3.20+. The
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("dev.nucleusframework:pdfium:149.0.7802.0")
+            implementation("dev.nucleusframework:pdfium:149.0.7802.0b")
         }
     }
 }
