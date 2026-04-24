@@ -72,6 +72,8 @@ jobs:
       - name: Setup Android SDK (Linux ARM64)
         if: matrix.os == 'ubuntu-24.04-arm'
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
