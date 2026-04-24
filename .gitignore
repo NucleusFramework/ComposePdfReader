@@ -26,6 +26,7 @@ node_modules/
 # pdfium-wasm tarball downloaded at build time). Regenerated on every build.
 pdfium/src/webMain/resources/pdfium/pdfium.wasm
 pdfium/src/webMain/resources/pdfium/pdfium.js
+pdfium/src/webMain/resources/pdfium/pdfium_runtime.mjs
 
 # Root-level test PDFs.
 /*.pdf
