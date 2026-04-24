@@ -1,0 +1,72 @@
+name: Test GraalVM Native Image
+
+on:
+  pull_request:
+    branches:
+      - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: test-graalvm-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-natives:
+    uses: ./.github/workflows/build-natives.yaml
+
+  graalvm:
+    needs: build-natives
+    name: GraalVM - ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+          - name: macOS ARM64
+            os: macos-latest
+          - name: Windows x64
+            os: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download PDFium JNI natives
+        uses: actions/download-artifact@v4
+        with:
+          path: pdfium/src/jvmMain/resources/pdfium/native/
+          pattern: 'pdfium-jni-*'
+          merge-multiple: true
+
+      - name: Select Xcode 26 (macOS)
+        if: runner.os == 'macOS'
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
+
+      - name: Setup Liberica NIK (GraalVM)
+        uses: graalvm/setup-graalvm@v1
+        with:
+          distribution: 'liberica'
+          java-version: '25'
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build GraalVM native image
+        shell: bash
+        run: ./gradlew :example:packageGraalvmNative -PnativeMarch=compatibility --no-daemon --stacktrace
+
+      - name: Upload GraalVM artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graalvm-${{ runner.os }}
+          path: |
+            example/build/compose/tmp/**/graalvm/output/**
+          if-no-files-found: warn

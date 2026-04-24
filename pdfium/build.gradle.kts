@@ -32,7 +32,7 @@ val publishVersion: String =
         ?.removePrefix("refs/tags/v")
         ?: "0.1.0"
 
-group = "dev.nucleusframework.pdf"
+group = "dev.nucleusframework"
 version = publishVersion
 
 val pdfiumVersion = libs.versions.pdfium.bblanchon.get()
@@ -114,17 +114,15 @@ kotlin {
         }
     }
 
-    // iOS targets are always declared so downstream KMP modules can resolve them on any host.
-    // On non-Mac hosts the actual compilation is disabled via kotlin.native.ignoreDisabledTargets.
+    // iOS targets are cross-compilable from any host (Kotlin/Native ships the
+    // necessary toolchain). The cinterop only needs the staged PDFium headers —
+    // libraryPaths/linkerOpts are consumed at final link time on macOS only.
     val iosTargets = listOf(iosArm64(), iosSimulatorArm64())
-
-    if (Os.isFamily(Os.FAMILY_MAC)) {
-        iosTargets.forEach { target ->
-            target.compilations.getByName("main") {
-                cinterops.create("pdfium") {
-                    defFile(project.file("src/nativeInterop/cinterop/pdfium.def"))
-                    packageName("dev.nucleusframework.pdfium.native")
-                }
+    iosTargets.forEach { target ->
+        target.compilations.getByName("main") {
+            cinterops.create("pdfium") {
+                defFile(project.file("src/nativeInterop/cinterop/pdfium.def"))
+                packageName("dev.nucleusframework.pdfium.native")
             }
         }
     }
@@ -472,15 +470,19 @@ val embedPdfiumDylibForXcode = tasks.register<EmbedPdfiumDylibTask>("embedPdfium
 
 val buildJniLinux = tasks.register<Exec>("buildJniLinux") {
     group = "pdfium"
-    description = "Compile the JNI glue for Linux x86_64."
+    description = "Compile the JNI glue for Linux (host architecture — x86_64 or aarch64)."
     onlyIf { Os.isFamily(Os.FAMILY_UNIX) && !Os.isFamily(Os.FAMILY_MAC) }
     dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
     val scriptDir = layout.projectDirectory.dir("src/jvmMain/native")
     workingDir(scriptDir)
     commandLine("bash", "build-linux.sh")
+    val hostTriplet = when (System.getProperty("os.arch")) {
+        "aarch64", "arm64" -> "linux-aarch64"
+        else -> "linux-x86-64"
+    }
     environment("PDFIUM_INCLUDE", stagedHeadersDir.get().asFile.absolutePath)
-    environment("PDFIUM_LIB", nativeJniResourceDir.dir("linux-x86-64").asFile.absolutePath)
-    environment("OUT_DIR", nativeJniResourceDir.dir("linux-x86-64").asFile.absolutePath)
+    environment("PDFIUM_LIB", nativeJniResourceDir.dir(hostTriplet).asFile.absolutePath)
+    environment("OUT_DIR", nativeJniResourceDir.dir(hostTriplet).asFile.absolutePath)
 }
 
 val buildJniMacOs = tasks.register<Exec>("buildJniMacOs") {
@@ -530,7 +532,10 @@ tasks.named("jvmProcessResources") {
     dependsOn(installPdfiumJvmResources, buildJniLinux, buildJniMacOs, buildJniWindows, buildJniWindowsArm)
 }
 
-tasks.named("wasmJsProcessResources") {
+// Both wasmJs and js source sets read staged pdfium.wasm + runtime glue from
+// webMain resources; wire the install/generate tasks as explicit deps of every
+// processResources task that copies from that directory.
+tasks.matching { it.name == "wasmJsProcessResources" || it.name == "jsProcessResources" }.configureEach {
     dependsOn(installPdfiumWasm, generatePdfiumWasmRuntime)
 }
 
@@ -564,7 +569,7 @@ tasks.register<JavaExec>("smokeTest") {
 // ---------- Maven Central publication ----------
 
 mavenPublishing {
-    coordinates("dev.nucleusframework.pdf", "pdfium", publishVersion)
+    coordinates("dev.nucleusframework", "pdfium", publishVersion)
 
     pom {
         name.set("Nucleus PDF — PDFium")

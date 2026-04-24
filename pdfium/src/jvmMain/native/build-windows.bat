@@ -11,30 +11,35 @@ if "%PDFIUM_LIB%"=="" (echo PDFIUM_LIB unset & exit /b 1)
 if "%OUT_DIR%"=="" (echo OUT_DIR unset & exit /b 1)
 if "%JAVA_HOME%"=="" (echo JAVA_HOME unset & exit /b 1)
 
-REM Bring MSVC into the environment if cl.exe is not already on PATH.
-where cl.exe >nul 2>&1
+REM Always call vcvarsall.bat with the target arch. Even when cl.exe is already on
+REM PATH (e.g. GitHub runners with ilammy/msvc-dev-cmd default x64), we still need
+REM to reconfigure the env for the requested %ARCH% so cross-compiles like arm64
+REM link against the right libraries.
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "!VSWHERE!" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "!VSWHERE!" (
+  echo ERROR: vswhere.exe not found. Install Visual Studio Build Tools.
+  exit /b 1
+)
+for /f "usebackq tokens=*" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+if "!VSINSTALL!"=="" (
+  echo ERROR: No Visual Studio installation with C++ tools detected by vswhere.
+  exit /b 1
+)
+set "VCVARS=!VSINSTALL!\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "!VCVARS!" (
+  echo ERROR: vcvarsall.bat not found at !VCVARS!
+  exit /b 1
+)
+REM For arm64 target on an x64 host, vcvarsall needs the cross-compile variant.
+set "VCVARS_ARCH=%ARCH%"
+if /I "%ARCH%"=="arm64" (
+  if /I not "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "VCVARS_ARCH=amd64_arm64"
+)
+call "!VCVARS!" %VCVARS_ARCH%
 if errorlevel 1 (
-  set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-  if not exist "!VSWHERE!" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
-  if not exist "!VSWHERE!" (
-    echo ERROR: cl.exe not on PATH and vswhere.exe not found. Install Visual Studio Build Tools or run from a Native Tools prompt.
-    exit /b 1
-  )
-  for /f "usebackq tokens=*" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
-  if "!VSINSTALL!"=="" (
-    echo ERROR: No Visual Studio installation with C++ tools detected by vswhere.
-    exit /b 1
-  )
-  set "VCVARS=!VSINSTALL!\VC\Auxiliary\Build\vcvarsall.bat"
-  if not exist "!VCVARS!" (
-    echo ERROR: vcvarsall.bat not found at !VCVARS!
-    exit /b 1
-  )
-  call "!VCVARS!" %ARCH%
-  if errorlevel 1 (
-    echo ERROR: vcvarsall.bat %ARCH% failed.
-    exit /b 1
-  )
+  echo ERROR: vcvarsall.bat %VCVARS_ARCH% failed.
+  exit /b 1
 )
 
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"

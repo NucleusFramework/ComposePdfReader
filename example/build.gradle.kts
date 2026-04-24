@@ -209,7 +209,7 @@ nucleus.application {
         targetFormats(TargetFormat.Dmg, TargetFormat.Nsis, TargetFormat.Deb, TargetFormat.AppImage)
         packageName = "NucleusPdf"
         packageVersion = "1.0.0"
-        homepage = "https://github.com/nucleusframework/nucleus-pdf"
+        homepage = "https://github.com/kdroidFilter/ComposePdf"
         // jdk.security.auth: UnixSystem — required by FileKit's XDG/DBus picker on Linux.
         // java.management: DBus transport dependencies.
         // jdk.unsupported: used by various native-interop helpers.

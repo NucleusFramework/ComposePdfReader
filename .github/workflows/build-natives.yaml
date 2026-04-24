@@ -27,6 +27,16 @@ jobs:
       - name: Install clang++
         run: sudo apt-get update && sudo apt-get install -y clang
 
+      # ubuntu-24.04-arm has no Android SDK preinstalled; com.android.library
+      # needs one at configuration time. ubuntu-latest x86-64 already ships with it.
+      # Default 'tools' package fails on ARM64 (legacy, no ARM64 build) — install
+      # only what AGP actually needs at configuration time: the compile platform.
+      - name: Setup Android SDK
+        if: matrix.arch == 'aarch64'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36'
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
 
