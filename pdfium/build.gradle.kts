@@ -114,17 +114,15 @@ kotlin {
         }
     }
 
-    // iOS targets are always declared so downstream KMP modules can resolve them on any host.
-    // On non-Mac hosts the actual compilation is disabled via kotlin.native.ignoreDisabledTargets.
+    // iOS targets are cross-compilable from any host (Kotlin/Native ships the
+    // necessary toolchain). The cinterop only needs the staged PDFium headers —
+    // libraryPaths/linkerOpts are consumed at final link time on macOS only.
     val iosTargets = listOf(iosArm64(), iosSimulatorArm64())
-
-    if (Os.isFamily(Os.FAMILY_MAC)) {
-        iosTargets.forEach { target ->
-            target.compilations.getByName("main") {
-                cinterops.create("pdfium") {
-                    defFile(project.file("src/nativeInterop/cinterop/pdfium.def"))
-                    packageName("dev.nucleusframework.pdfium.native")
-                }
+    iosTargets.forEach { target ->
+        target.compilations.getByName("main") {
+            cinterops.create("pdfium") {
+                defFile(project.file("src/nativeInterop/cinterop/pdfium.def"))
+                packageName("dev.nucleusframework.pdfium.native")
             }
         }
     }
@@ -534,7 +532,10 @@ tasks.named("jvmProcessResources") {
     dependsOn(installPdfiumJvmResources, buildJniLinux, buildJniMacOs, buildJniWindows, buildJniWindowsArm)
 }
 
-tasks.named("wasmJsProcessResources") {
+// Both wasmJs and js source sets read staged pdfium.wasm + runtime glue from
+// webMain resources; wire the install/generate tasks as explicit deps of every
+// processResources task that copies from that directory.
+tasks.matching { it.name == "wasmJsProcessResources" || it.name == "jsProcessResources" }.configureEach {
     dependsOn(installPdfiumWasm, generatePdfiumWasmRuntime)
 }
 
