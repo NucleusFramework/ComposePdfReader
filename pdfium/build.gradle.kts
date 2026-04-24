@@ -534,8 +534,14 @@ tasks.named("jvmProcessResources") {
 
 // Both wasmJs and js source sets read staged pdfium.wasm + runtime glue from
 // webMain resources; wire the install/generate tasks as explicit deps of every
-// processResources task that copies from that directory.
-tasks.matching { it.name == "wasmJsProcessResources" || it.name == "jsProcessResources" }.configureEach {
+// processResources task that copies from that directory. The commonized
+// metadataWebMainProcessResources (run during publication) also reads the same
+// directory, so it needs the same dependency.
+tasks.matching {
+    it.name == "wasmJsProcessResources" ||
+        it.name == "jsProcessResources" ||
+        it.name == "metadataWebMainProcessResources"
+}.configureEach {
     dependsOn(installPdfiumWasm, generatePdfiumWasmRuntime)
 }
 
