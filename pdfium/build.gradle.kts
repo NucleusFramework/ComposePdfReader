@@ -472,15 +472,19 @@ val embedPdfiumDylibForXcode = tasks.register<EmbedPdfiumDylibTask>("embedPdfium
 
 val buildJniLinux = tasks.register<Exec>("buildJniLinux") {
     group = "pdfium"
-    description = "Compile the JNI glue for Linux x86_64."
+    description = "Compile the JNI glue for Linux (host architecture — x86_64 or aarch64)."
     onlyIf { Os.isFamily(Os.FAMILY_UNIX) && !Os.isFamily(Os.FAMILY_MAC) }
     dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
     val scriptDir = layout.projectDirectory.dir("src/jvmMain/native")
     workingDir(scriptDir)
     commandLine("bash", "build-linux.sh")
+    val hostTriplet = when (System.getProperty("os.arch")) {
+        "aarch64", "arm64" -> "linux-aarch64"
+        else -> "linux-x86-64"
+    }
     environment("PDFIUM_INCLUDE", stagedHeadersDir.get().asFile.absolutePath)
-    environment("PDFIUM_LIB", nativeJniResourceDir.dir("linux-x86-64").asFile.absolutePath)
-    environment("OUT_DIR", nativeJniResourceDir.dir("linux-x86-64").asFile.absolutePath)
+    environment("PDFIUM_LIB", nativeJniResourceDir.dir(hostTriplet).asFile.absolutePath)
+    environment("OUT_DIR", nativeJniResourceDir.dir(hostTriplet).asFile.absolutePath)
 }
 
 val buildJniMacOs = tasks.register<Exec>("buildJniMacOs") {
