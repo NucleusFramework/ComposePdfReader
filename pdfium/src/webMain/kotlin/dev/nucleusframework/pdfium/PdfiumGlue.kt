@@ -1,24 +1,23 @@
 @file:JsModule("./pdfium_glue.mjs")
+@file:OptIn(ExperimentalWasmJsInterop::class)
 
 package dev.nucleusframework.pdfium
 
+import kotlin.js.ExperimentalWasmJsInterop
+import kotlin.js.JsAny
+import kotlin.js.JsArray
+import kotlin.js.JsString
 import kotlin.js.Promise
 import org.khronos.webgl.ArrayBuffer
 import org.khronos.webgl.Float32Array
 import org.khronos.webgl.Int32Array
 
 /**
- * External bindings to `pdfium_glue.mjs`. Every call goes over a Web Worker boundary —
- * the JS side returns a [Promise] that resolves once the worker posts back its result.
- * Typed arrays (`Float32Array`, `Int32Array`) and the pixel `ArrayBuffer` are moved via
- * `postMessage` transferables, so they reach the main thread without a structured-clone
- * copy. Handles (document / page pointers) are plain [Int]s into the worker's pdfium
- * heap; the main thread never dereferences them.
- *
- * The `Promise<JsAny?>` return type matches the shape expected by
- * `kotlinx.coroutines.await`'s signature on wasmJs (which is declared as
- * `Promise<JsAny?>.await(): T`); the actual fulfilment values implement the typed
- * result interfaces below and are cast at call sites.
+ * External bindings to `pdfium_glue.mjs`. Shared between jsMain and wasmJsMain via the
+ * `webMain` source set — all interfaces extend [JsAny] so the declarations are valid on
+ * both platforms. The RPC functions uniformly return `Promise<JsAny?>` because
+ * `kotlinx.coroutines.await` on wasmJs is declared on that receiver type; call sites go
+ * through [awaitTyped] to recover the typed fulfilment value.
  */
 internal external interface OpenResult : JsAny {
     val doc: Int

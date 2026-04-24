@@ -2,16 +2,21 @@
 
 A Kotlin Multiplatform PDF rendering and text-extraction library built on top of
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) and
-Compose Multiplatform. Zero-copy render pipeline on JVM / Android / iOS (Web
-posts pixels from a worker), a Compose-first API, and a sample desktop/mobile
-reader with thumbnails, progressive rendering, and selectable text.
+Compose Multiplatform. Zero-copy render pipeline on every target — on the web
+the transferred pixel `ArrayBuffer` is written straight into Skia's wasm heap,
+no intermediate Kotlin `ByteArray`. A Compose-first API and a sample
+desktop/mobile reader with thumbnails, progressive rendering, and selectable
+text round it out.
 
 ## Features
 
 - **Compose Multiplatform composables** — drop `PdfPage` or `PdfThumbnail` into
   any Compose UI.
-- **Zero-copy rendering** on JVM / Android / iOS: PDFium writes directly into
-  Skia / Android `Bitmap` pixel memory.
+- **Zero-copy rendering** on every target. JVM / Android / iOS hand PDFium a
+  raw pixel pointer into Skia / Android `Bitmap` memory. Web allocates the
+  destination buffer inside Skia's wasm heap via `Data.makeUninitialized` and
+  writes the worker's transferred `ArrayBuffer` straight in — no Kotlin
+  `ByteArray` round-trip, no `installPixels` second copy.
 - **Progressive rendering** (preview → full) with a debounced size flow, so
   scroll and zoom feel instant.
 - **Two-tier LRU cache** (reader bitmaps + thumbnails) with off-screen prefetch.
@@ -594,10 +599,13 @@ screenH     = (top   - bottom) × scaleY
 │   PdfThumbnail    ─┘                                                         │
 │   PdfRenderCache    PageTextLayout   textClipEntry (expect)                  │
 ├──────────────────┬───────────────┬─────────────┬─────────────────────────────┤
-│ jvmMain          │ androidMain   │ iosMain     │ jsMain / wasmJsMain (web)   │
-│   JNI glue       │ JNI + NDK     │ cinterop    │ pdfium.wasm in a Web Worker │
-│   → Skia Bitmap  │ AndroidBitmap │ libpdfium.a │ RPC via postMessage,        │
-│   zero-copy      │ zero-copy     │ + Skia      │ transferable pixels → Skia  │
+│ jvmMain          │ androidMain   │ iosMain     │ webMain (js + wasmJs)       │
+│   JNI glue       │ JNI + NDK     │ cinterop    │   pdfium.wasm in a Web      │
+│   → Skia Bitmap  │ AndroidBitmap │ libpdfium.a │   Worker; RPC via           │
+│   zero-copy      │ zero-copy     │ + Skia      │   postMessage transferables │
+│                  │               │             │   → Skia heap zero-copy     │
+│                  │               │             │ jsMain / wasmJsMain just    │
+│                  │               │             │ host a small PlatformBridge │
 └──────────────────┴───────────────┴─────────────┴─────────────────────────────┘
 ```
 
@@ -613,6 +621,13 @@ Key facts:
   `Bitmap.peekPixels().addr` and pass it to `FPDFBitmap_CreateEx`. PDFium
   writes BGRA pixels straight into Skia's bitmap memory. On Android we lock
   the `android.graphics.Bitmap` via `AndroidBitmap_lockPixels` and do the same.
+  On web, the pdfium worker transfers the pixel `ArrayBuffer` to the main
+  thread; we allocate the destination inside Skia's own wasm heap via
+  `Data.makeUninitialized` and copy the transferred buffer directly there with
+  a typed-array `.set()` on the Skia memory view obtained through
+  `org.jetbrains.skiko.wasm.awaitSkiko`. One memcpy into the final
+  destination, no `installPixels` round-trip. Pattern cribbed from
+  [coil3.decode.WebWorker](https://github.com/coil-kt/coil/blob/69b8383a3f95300ddb466afdbe9c54ce2eccb652/coil-core/src/jsCommonMain/kotlin/coil3/decode/WebWorker.kt).
 
 - **Native binary delivery.** `pdfium/build.gradle.kts` registers a set of
   Gradle tasks that download the bblanchon archives, extract them, and stage
@@ -707,12 +722,12 @@ if available.
   bounding boxes, not glyph positioning from the embedded PDF font. Copied
   text is exact, but highlight rectangles can differ slightly from what
   Chrome / PDF.js render when they can access the original font metrics.
-- **Web: no zero-copy to Skia.** On wasmJs/JS, `pdfium.wasm` runs inside a
-  dedicated Web Worker (so the main thread never blocks). Pixels are posted
-  to the main thread via `postMessage` transferables and bulk-copied once
-  into a Skia `Bitmap` via `installPixels` — the only unavoidable copy
-  in the pipeline, since Skia has its own wasm heap with no direct
-  `ArrayBuffer` install.
+- **Web: still one memcpy per render.** "Zero-copy" here means "no
+  intermediate Kotlin `ByteArray`, no `installPixels`" — the worker's
+  transferred `ArrayBuffer` is written straight into Skia's wasm heap. A true
+  zero-memcpy pipeline would need `SharedArrayBuffer` (which in turn requires
+  COOP/COEP headers) so the pdfium worker and Skia share one linear memory.
+  Not currently implemented.
 - **Licensing.** PDFium is dual-licensed BSD-3-Clause / Apache-2.0 (see
   PDFium's `LICENSE`). bblanchon's binaries carry that license forward. If
   you ship this code, include the upstream PDFium notices.
