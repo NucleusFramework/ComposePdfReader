@@ -1,0 +1,120 @@
+name: Build PDFium JNI Natives
+
+on:
+  workflow_call:
+
+jobs:
+  linux:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86-64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install clang++
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build PDFium JNI glue (Linux ${{ matrix.arch }})
+        run: ./gradlew :pdfium:buildJniLinux --no-configuration-cache
+
+      - name: Verify JNI output
+        run: |
+          f="pdfium/src/jvmMain/resources/pdfium/native/linux-${{ matrix.arch }}/libpdfiumjni.so"
+          if [ ! -f "$f" ]; then echo "MISSING: $f" >&2; exit 1; fi
+          echo "OK: $f ($(wc -c < "$f") bytes)"
+
+      - name: Upload JNI artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfium-jni-linux-${{ matrix.arch }}
+          path: pdfium/src/jvmMain/resources/pdfium/native/linux-*/libpdfiumjni.so
+          retention-days: 1
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build PDFium JNI glue (macOS universal)
+        run: ./gradlew :pdfium:buildJniMacOs --no-configuration-cache
+
+      - name: Verify JNI outputs
+        run: |
+          for f in \
+            pdfium/src/jvmMain/resources/pdfium/native/darwin-aarch64/libpdfiumjni.dylib \
+            pdfium/src/jvmMain/resources/pdfium/native/darwin-x86-64/libpdfiumjni.dylib; do
+            if [ ! -f "$f" ]; then echo "MISSING: $f" >&2; exit 1; fi
+            echo "OK: $f ($(wc -c < "$f") bytes)"
+          done
+
+      - name: Upload JNI artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfium-jni-macos
+          path: pdfium/src/jvmMain/resources/pdfium/native/darwin-*/libpdfiumjni.dylib
+          retention-days: 1
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup MSVC (x64 + arm64 cross)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Build PDFium JNI glue (Windows x64 + arm64)
+        shell: bash
+        run: ./gradlew :pdfium:buildJniWindows :pdfium:buildJniWindowsArm -Ppdfium.buildWinArm=true --no-configuration-cache
+
+      - name: Verify JNI outputs
+        shell: bash
+        run: |
+          for f in \
+            pdfium/src/jvmMain/resources/pdfium/native/win32-x86-64/pdfiumjni.dll \
+            pdfium/src/jvmMain/resources/pdfium/native/win32-arm64/pdfiumjni.dll; do
+            if [ ! -f "$f" ]; then echo "MISSING: $f" >&2; exit 1; fi
+            echo "OK: $f ($(wc -c < "$f") bytes)"
+          done
+
+      - name: Upload JNI artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfium-jni-windows
+          path: pdfium/src/jvmMain/resources/pdfium/native/win32-*/pdfiumjni.dll
+          retention-days: 1

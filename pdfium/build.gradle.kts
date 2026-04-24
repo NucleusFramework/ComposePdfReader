@@ -23,10 +23,17 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.downloadTask)
+    alias(libs.plugins.vanniktechMavenPublish)
 }
 
+val publishVersion: String =
+    providers.environmentVariable("GITHUB_REF")
+        .orNull
+        ?.removePrefix("refs/tags/v")
+        ?: "0.1.0"
+
 group = "dev.nucleusframework.pdf"
-version = "0.1.0"
+version = publishVersion
 
 val pdfiumVersion = libs.versions.pdfium.bblanchon.get()
 val pdfiumBaseUrl = "https://github.com/bblanchon/pdfium-binaries/releases/download/$pdfiumVersion"
@@ -552,4 +559,52 @@ tasks.register<JavaExec>("smokeTest") {
     classpath = files(main.output.allOutputs) + smokeTestRuntime
     mainClass.set("dev.nucleusframework.pdfium.jvm.SmokeTestKt")
     if (project.hasProperty("pdfPath")) args(project.property("pdfPath") as String)
+}
+
+// ---------- Maven Central publication ----------
+
+mavenPublishing {
+    coordinates("dev.nucleusframework.pdf", "pdfium", publishVersion)
+
+    pom {
+        name.set("Nucleus PDF — PDFium")
+        description.set(
+            "Compose Multiplatform PDF rendering backed by bblanchon's PDFium binaries " +
+                "(JVM, Android, iOS, JS, WasmJs).",
+        )
+        url.set("https://github.com/kdroidFilter/pdf")
+        inceptionYear.set("2025")
+
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+            }
+        }
+
+        developers {
+            developer {
+                id.set("kdroidfilter")
+                name.set("kdroidFilter")
+                url.set("https://github.com/kdroidFilter")
+            }
+        }
+
+        scm {
+            url.set("https://github.com/kdroidFilter/pdf")
+            connection.set("scm:git:git://github.com/kdroidFilter/pdf.git")
+            developerConnection.set("scm:git:ssh://git@github.com/kdroidFilter/pdf.git")
+        }
+    }
+
+    publishToMavenCentral()
+    if (project.hasProperty("signingInMemoryKey")) {
+        signAllPublications()
+    }
+}
+
+// Ensure every Jar-producing task sees the staged natives + headers before archiving,
+// otherwise the published JVM jar and source jars ship without the bblanchon libs.
+tasks.matching { it.name == "sourcesJar" || it.name == "jvmSourcesJar" }.configureEach {
+    dependsOn(installPdfiumJvmResources, installPdfiumHeaders)
 }

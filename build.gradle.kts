@@ -9,4 +9,5 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform) apply false
     alias(libs.plugins.nucleus) apply false
     alias(libs.plugins.downloadTask) apply false
+    alias(libs.plugins.vanniktechMavenPublish) apply false
 }
