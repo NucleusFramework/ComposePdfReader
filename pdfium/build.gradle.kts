@@ -143,6 +143,9 @@ kotlin {
         }
         androidMain.dependencies { implementation(libs.kotlinx.coroutinesAndroid) }
         jvmMain.dependencies { implementation(libs.kotlinx.coroutinesSwing) }
+        // kotlinx-browser exposes the org.khronos.webgl.* typed arrays as a shared API
+        // across js + wasmJs, so they resolve in the webMain metadata compilation.
+        webMain.dependencies { implementation(libs.kotlinx.browser) }
     }
 }
 
