@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+add_link_options("-Wl,-z,max-page-size=16384")
+
 # Headers staged by the Gradle task `installPdfiumHeaders`.
 set(PDFIUM_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../build/pdfium/include")
 if(NOT EXISTS "${PDFIUM_INCLUDE_DIR}")
