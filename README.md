@@ -1,4 +1,4 @@
-# ComposePdf
+# ComposePdfReader
 
 A Kotlin Multiplatform PDF rendering and text-extraction library built on top of
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) and
