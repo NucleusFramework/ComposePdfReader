@@ -28,14 +28,27 @@ internal object PdfiumBridge {
         height: Int,
         swapRedBlue: Boolean,
     ): Boolean
-    /** Zero-copy render: writes directly at [address]. Flags = `FPDF_ANNOT | FPDF_LCD_TEXT | …`. */
+    /**
+     * Zero-copy render: writes directly at [address]. Flags = `FPDF_ANNOT | FPDF_LCD_TEXT | …`.
+     * [form] is an optional FPDF_FORMHANDLE from [nInitFormEnv] — pass 0 to skip widget overlay;
+     * non-zero enables FPDF_FFLDraw rendering of form fields and signature appearances.
+     */
     @JvmStatic external fun nRenderPageToAddress(
         page: Long,
+        form: Long,
         address: Long,
         width: Int,
         height: Int,
         flags: Int,
     ): Boolean
+    /**
+     * Initialize a form-fill environment for the given document handle. Returns 0 if PDFium
+     * refuses (e.g. document already closed). Must be paired with [nCloseFormEnv] before
+     * [nCloseDocument] runs.
+     */
+    @JvmStatic external fun nInitFormEnv(doc: Long): Long
+    /** Tear down the form handle. Safe to call with 0. */
+    @JvmStatic external fun nCloseFormEnv(form: Long)
     @JvmStatic external fun nGetPageText(page: Long): String?
     /** Count of line-level text rectangles on the given page. */
     @JvmStatic external fun nCountTextRects(page: Long): Int

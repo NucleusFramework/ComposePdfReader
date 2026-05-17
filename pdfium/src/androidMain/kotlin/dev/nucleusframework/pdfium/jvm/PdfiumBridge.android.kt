@@ -28,14 +28,23 @@ internal object PdfiumBridge {
         height: Int,
         swapRedBlue: Boolean,
     ): Boolean
-    /** Android-only zero-copy render: locks the Bitmap's pixels and writes directly. */
+    /**
+     * Android-only zero-copy render: locks the Bitmap's pixels and writes directly.
+     * [form] is an optional FPDF_FORMHANDLE from [nInitFormEnv] — pass 0 to skip widget overlay;
+     * non-zero enables FPDF_FFLDraw rendering of form fields and signature appearances.
+     */
     @JvmStatic external fun nRenderPageToBitmap(
         page: Long,
+        form: Long,
         bitmap: android.graphics.Bitmap,
         width: Int,
         height: Int,
         flags: Int,
     ): Boolean
+    /** Init form-fill environment for [doc]. Returns 0 on failure. */
+    @JvmStatic external fun nInitFormEnv(doc: Long): Long
+    /** Tear down a form handle. Must run before the underlying document is closed. */
+    @JvmStatic external fun nCloseFormEnv(form: Long)
     @JvmStatic external fun nGetPageText(page: Long): String?
     @JvmStatic external fun nCountTextRects(page: Long): Int
     @JvmStatic external fun nExtractTextRects(

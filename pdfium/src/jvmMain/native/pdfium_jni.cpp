@@ -12,6 +12,7 @@
 
 #include "fpdfview.h"
 #include "fpdf_doc.h"
+#include "fpdf_formfill.h"
 #include "fpdf_text.h"
 
 namespace {
@@ -184,10 +185,15 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPage(
  * Layout: BGRA, stride = width*4. Caller owns the memory; we only write.
  * [flags] is a bitmask from fpdfview.h (FPDF_ANNOT, FPDF_LCD_TEXT, FPDF_REVERSE_BYTE_ORDER, …).
  * Passing 0 yields the fastest render (draft quality).
+ *
+ * [form] is an optional FPDF_FORMHANDLE (from nInitFormEnv) — pass 0 to skip widget rendering.
+ * When non-zero, FPDF_FFLDraw overlays form-field appearances (interactive widgets and
+ * signature appearance streams) on top of the page contents. PDFium documents this as the
+ * required second pass for displaying form widgets correctly.
  */
 JNIEXPORT jboolean JNICALL
 Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToAddress(
-        JNIEnv*, jclass, jlong page, jlong address,
+        JNIEnv*, jclass, jlong page, jlong form, jlong address,
         jint width, jint height, jint flags) {
     if (page == 0 || address == 0) return JNI_FALSE;
     void* buffer = reinterpret_cast<void*>(address);
@@ -196,10 +202,50 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToAddress(
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, buffer, stride);
     if (!bmp) return JNI_FALSE;
     FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xFFFFFFFF);
-    FPDF_RenderPageBitmap(bmp, reinterpret_cast<FPDF_PAGE>(page),
-                          0, 0, width, height, 0, flags);
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_RenderPageBitmap(bmp, p, 0, 0, width, height, 0, flags);
+    if (form != 0) {
+        FPDF_FORMHANDLE fh = reinterpret_cast<FPDF_FORMHANDLE>(form);
+        FORM_OnAfterLoadPage(p, fh);
+        FPDF_FFLDraw(fh, bmp, p, 0, 0, width, height, 0, flags);
+        FORM_OnBeforeClosePage(p, fh);
+    }
     FPDFBitmap_Destroy(bmp);
     return JNI_TRUE;
+}
+
+// Minimal FPDF_FORMFILLINFO for read-only widget rendering. All callbacks left null —
+// PDFium tolerates this for static-render use cases (no JavaScript, no field interaction).
+// Must out-live the FPDF_FORMHANDLE returned by FPDFDOC_InitFormFillEnvironment, so it's
+// declared with static storage. A single shared instance across documents is safe: the
+// struct holds no per-document state.
+namespace { FPDF_FORMFILLINFO g_formInfo = []() { FPDF_FORMFILLINFO i{}; i.version = 2; return i; }(); }
+
+/**
+ * Initialize a form-fill environment for [doc] and return its handle. The handle is
+ * passed to [nRenderPageToAddress] / [nRenderPageToBitmap] so PDFium can overlay
+ * widget annotations (form fields, signatures) on top of rendered pages. Returns 0
+ * if PDFium refuses; caller may continue without form-fill in that case.
+ */
+JNIEXPORT jlong JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nInitFormEnv(
+        JNIEnv*, jclass, jlong doc) {
+    if (doc == 0) return 0;
+    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(
+        reinterpret_cast<FPDF_DOCUMENT>(doc), &g_formInfo);
+    return reinterpret_cast<jlong>(form);
+}
+
+/**
+ * Tear down the form-fill environment created by [nInitFormEnv]. Must be called BEFORE
+ * the underlying FPDF_DOCUMENT is closed — PDFium will crash if you exit the document
+ * first.
+ */
+JNIEXPORT void JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nCloseFormEnv(
+        JNIEnv*, jclass, jlong form) {
+    if (form == 0) return;
+    FPDFDOC_ExitFormFillEnvironment(reinterpret_cast<FPDF_FORMHANDLE>(form));
 }
 
 /**
