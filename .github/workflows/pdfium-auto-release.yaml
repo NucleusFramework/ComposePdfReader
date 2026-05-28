@@ -1,0 +1,225 @@
+name: Auto-release PDFium
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # daily 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pdfium-auto-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_bump: ${{ steps.compare.outputs.needs_bump }}
+      chromium_tag: ${{ steps.upstream.outputs.tag_name }}
+      full_version: ${{ steps.upstream.outputs.full_version }}
+      branch: ${{ steps.push.outputs.branch }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Resolve latest bblanchon release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release=$(gh api repos/bblanchon/pdfium-binaries/releases/latest)
+          tag_name=$(echo "$release" | jq -r .tag_name)
+          name=$(echo "$release" | jq -r .name)
+          chromium_branch=${tag_name#chromium/}
+          full_version=$(echo "$name" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ -z "$full_version" ]; then
+            echo "::error::Could not parse full version from release name: $name"
+            exit 1
+          fi
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "chromium_branch=$chromium_branch" >> "$GITHUB_OUTPUT"
+          echo "full_version=$full_version" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream: $tag_name ($full_version)"
+
+      - name: Compare with current pin
+        id: compare
+        run: |
+          set -euo pipefail
+          current=$(grep '^pdfium-bblanchon' gradle/libs.versions.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Current pin: $current"
+          if [ "$current" = "${{ steps.upstream.outputs.tag_name }}" ]; then
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            echo "Already up-to-date — nothing to do."
+          else
+            echo "needs_bump=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check tag does not already exist
+        if: steps.compare.outputs.needs_bump == 'true'
+        run: |
+          set -euo pipefail
+          tag="v${{ steps.upstream.outputs.full_version }}"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q "$tag"; then
+            echo "::error::Tag $tag already exists. Refusing to re-release. Use a manual suffix (e.g. ${tag}b) if a re-publish is needed."
+            exit 1
+          fi
+
+      - name: Push bump branch
+        if: steps.compare.outputs.needs_bump == 'true'
+        id: push
+        run: |
+          set -euo pipefail
+          branch="bump/pdfium-${{ steps.upstream.outputs.chromium_branch }}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          sed -i -E "s|^pdfium-bblanchon = .*|pdfium-bblanchon = \"${{ steps.upstream.outputs.tag_name }}\"|" gradle/libs.versions.toml
+          git add gradle/libs.versions.toml
+          git commit -m "chore(pdfium): bump to ${{ steps.upstream.outputs.tag_name }} (${{ steps.upstream.outputs.full_version }})"
+          git push --force origin "$branch"
+
+  build-natives:
+    needs: detect
+    if: needs.detect.outputs.needs_bump == 'true'
+    uses: ./.github/workflows/build-natives.yaml
+    with:
+      ref: ${{ needs.detect.outputs.branch }}
+
+  check:
+    needs: [detect, build-natives]
+    if: needs.detect.outputs.needs_bump == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bump branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.branch }}
+
+      - name: Download PDFium JNI natives
+        uses: actions/download-artifact@v4
+        with:
+          path: pdfium/src/jvmMain/resources/pdfium/native/
+          pattern: 'pdfium-jni-*'
+          merge-multiple: true
+
+      - name: Verify all JNI natives present
+        run: |
+          EXPECTED=(
+            "pdfium/src/jvmMain/resources/pdfium/native/linux-x86-64/libpdfiumjni.so"
+            "pdfium/src/jvmMain/resources/pdfium/native/linux-aarch64/libpdfiumjni.so"
+            "pdfium/src/jvmMain/resources/pdfium/native/darwin-aarch64/libpdfiumjni.dylib"
+            "pdfium/src/jvmMain/resources/pdfium/native/darwin-x86-64/libpdfiumjni.dylib"
+            "pdfium/src/jvmMain/resources/pdfium/native/win32-x86-64/pdfiumjni.dll"
+            "pdfium/src/jvmMain/resources/pdfium/native/win32-arm64/pdfiumjni.dll"
+          )
+          MISSING=0
+          for f in "${EXPECTED[@]}"; do
+            if [ -f "$f" ]; then
+              echo "OK: $f ($(wc -c < "$f") bytes)"
+            else
+              echo "MISSING: $f" >&2
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then exit 1; fi
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run :pdfium:check
+        run: ./gradlew :pdfium:check --continue
+
+  publish:
+    needs: [detect, check]
+    if: needs.detect.outputs.needs_bump == 'true'
+    # macOS runner builds darwin JNI inline; Linux/Windows JNI come from artefacts.
+    # Same setup as publish-maven.yaml so the published artefact set is identical.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout bump branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Fast-forward master to bump branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge-base --is-ancestor origin/master HEAD; then
+            echo "::error::Bump branch diverged from master since CI started. Aborting; the next cron run will retry from current master."
+            exit 1
+          fi
+          git push origin HEAD:master
+
+      - name: Create and push release tag
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.detect.outputs.full_version }}"
+          git tag "$tag"
+          git push origin "$tag"
+
+      - name: Delete bump branch
+        run: git push origin --delete "${{ needs.detect.outputs.branch }}" || true
+
+      - name: Download PDFium JNI natives
+        uses: actions/download-artifact@v4
+        with:
+          path: pdfium/src/jvmMain/resources/pdfium/native/
+          pattern: 'pdfium-jni-*'
+          merge-multiple: true
+
+      - name: Verify all JNI natives present
+        run: |
+          EXPECTED=(
+            "pdfium/src/jvmMain/resources/pdfium/native/linux-x86-64/libpdfiumjni.so"
+            "pdfium/src/jvmMain/resources/pdfium/native/linux-aarch64/libpdfiumjni.so"
+            "pdfium/src/jvmMain/resources/pdfium/native/darwin-aarch64/libpdfiumjni.dylib"
+            "pdfium/src/jvmMain/resources/pdfium/native/darwin-x86-64/libpdfiumjni.dylib"
+            "pdfium/src/jvmMain/resources/pdfium/native/win32-x86-64/pdfiumjni.dll"
+            "pdfium/src/jvmMain/resources/pdfium/native/win32-arm64/pdfiumjni.dll"
+          )
+          MISSING=0
+          for f in "${EXPECTED[@]}"; do
+            if [ -f "$f" ]; then
+              echo "OK: $f ($(wc -c < "$f") bytes)"
+            else
+              echo "MISSING: $f" >&2
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then exit 1; fi
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Publish to Maven Central
+        # GITHUB_REF override drives pdfium/build.gradle.kts publishVersion (reads
+        # GITHUB_REF and strips refs/tags/v). The tag was pushed by GITHUB_TOKEN
+        # so publish-maven.yaml will not fire — publishing inline avoids the
+        # recursive-trigger gap and keeps everything in one run.
+        env:
+          GITHUB_REF: refs/tags/v${{ needs.detect.outputs.full_version }}
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVENCENTRALUSERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVENCENTRALPASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNINGINMEMORYKEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNINGKEYID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNINGPASSWORD }}
+        run: ./gradlew :pdfium:publishAndReleaseToMavenCentral --no-configuration-cache
