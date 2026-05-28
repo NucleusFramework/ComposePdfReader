@@ -17,9 +17,15 @@ import dev.nucleusframework.pdfium.native.FPDFText_GetUnicode
 import dev.nucleusframework.pdfium.native.FPDFText_LoadPage
 import kotlinx.cinterop.DoubleVar
 import kotlinx.cinterop.value
+import dev.nucleusframework.pdfium.native.FORM_OnAfterLoadPage
+import dev.nucleusframework.pdfium.native.FORM_OnBeforeClosePage
+import dev.nucleusframework.pdfium.native.FPDFDOC_ExitFormFillEnvironment
+import dev.nucleusframework.pdfium.native.FPDFDOC_InitFormFillEnvironment
 import dev.nucleusframework.pdfium.native.FPDF_ANNOT
 import dev.nucleusframework.pdfium.native.FPDF_CloseDocument
 import dev.nucleusframework.pdfium.native.FPDF_ClosePage
+import dev.nucleusframework.pdfium.native.FPDF_FFLDraw
+import dev.nucleusframework.pdfium.native.FPDF_FORMFILLINFO
 import dev.nucleusframework.pdfium.native.FPDF_GetLastError
 import dev.nucleusframework.pdfium.native.FPDF_GetMetaText
 import dev.nucleusframework.pdfium.native.FPDF_GetPageCount
@@ -31,6 +37,8 @@ import dev.nucleusframework.pdfium.native.FPDF_LoadMemDocument64
 import dev.nucleusframework.pdfium.native.FPDF_LoadPage
 import dev.nucleusframework.pdfium.native.FPDF_RenderPageBitmap
 import cnames.structs.fpdf_document_t__
+import cnames.structs.fpdf_form_handle_t__
+import kotlinx.cinterop.nativeHeap
 import kotlin.concurrent.AtomicReference
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointer
@@ -81,6 +89,11 @@ internal actual class PdfDocument(
     // The pin must stay alive until close() or PDFium will dereference freed memory on the
     // next FPDF_LoadPage / FPDF_GetMetaText call.
     private val pinnedBuffer: Pinned<ByteArray>,
+    // Per-document FPDF_FORMHANDLE used for FPDF_FFLDraw widget overlay (signatures, form
+    // fields). May be null if PDFium refused init — render falls back to no overlay.
+    private val formHandle: CPointer<fpdf_form_handle_t__>?,
+    // The FPDF_FORMFILLINFO backing the form handle. Must out-live the handle; freed in close().
+    private val formInfoPtr: CPointer<FPDF_FORMFILLINFO>?,
 ) {
     actual val pageCount: Int = FPDF_GetPageCount(handle)
     actual val metadata: PdfMetadata = PdfMetadata(
@@ -127,6 +140,13 @@ internal actual class PdfDocument(
                 RenderQuality.FULL -> FPDF_ANNOT
             }
             FPDF_RenderPageBitmap(bmp, page, 0, 0, widthPx, heightPx, 0, flags)
+            // Form widget overlay (signatures, fillable fields). Only at FULL quality —
+            // PREVIEW renders are thumbnails and don't need the extra pass.
+            if (quality == RenderQuality.FULL && formHandle != null) {
+                FORM_OnAfterLoadPage(page, formHandle)
+                FPDF_FFLDraw(formHandle, bmp, page, 0, 0, widthPx, heightPx, 0, flags)
+                FORM_OnBeforeClosePage(page, formHandle)
+            }
             FPDFBitmap_Destroy(bmp)
         } finally {
             FPDF_ClosePage(page)
@@ -238,6 +258,10 @@ internal actual class PdfDocument(
     }
 
     actual fun close() {
+        // Form-fill env must be torn down BEFORE the document — PDFium dereferences the
+        // document inside FPDFDOC_ExitFormFillEnvironment.
+        if (formHandle != null) FPDFDOC_ExitFormFillEnvironment(formHandle)
+        if (formInfoPtr != null) nativeHeap.free(formInfoPtr.rawValue)
         FPDF_CloseDocument(handle)
         pinnedBuffer.unpin()
     }
@@ -277,5 +301,11 @@ internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?)
             pinned.unpin()
             error("PDFium refused to open document (err=$err)")
         }
-        PdfDocument(handle, pinned)
+        // Form-fill env: minimal callbacks (version=2, all null) is enough for static widget
+        // rendering. The struct lives in nativeHeap because PDFium retains a borrowed pointer
+        // to it for the form handle's lifetime.
+        val formInfo = nativeHeap.alloc<FPDF_FORMFILLINFO>().apply { version = 2 }
+        val formHandle = FPDFDOC_InitFormFillEnvironment(handle, formInfo.ptr)
+        if (formHandle == null) nativeHeap.free(formInfo.rawPtr)
+        PdfDocument(handle, pinned, formHandle, if (formHandle != null) formInfo.ptr else null)
     }

@@ -1,6 +1,6 @@
 package = dev.nucleusframework.pdfium.native
 language = C
-headers = fpdfview.h fpdf_doc.h fpdf_text.h
+headers = fpdfview.h fpdf_doc.h fpdf_formfill.h fpdf_text.h
 headerFilter = fpdf*.h
 
 # Headers are staged by the Gradle task `installPdfiumHeaders` under build/pdfium/include.

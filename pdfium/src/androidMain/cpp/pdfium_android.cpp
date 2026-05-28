@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "fpdfview.h"
+#include "fpdf_formfill.h"
 
 #define LOG_TAG "pdfiumjni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -17,7 +18,7 @@ extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToBitmap(
-        JNIEnv* env, jclass, jlong page, jobject bitmap,
+        JNIEnv* env, jclass, jlong page, jlong form, jobject bitmap,
         jint width, jint height, jint flags) {
     if (page == 0 || bitmap == nullptr) return JNI_FALSE;
 
@@ -48,8 +49,15 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nRenderPageToBitmap(
         return JNI_FALSE;
     }
     FPDFBitmap_FillRect(bmp, 0, 0, width, height, 0xFFFFFFFF);
-    FPDF_RenderPageBitmap(bmp, reinterpret_cast<FPDF_PAGE>(page),
-                          0, 0, width, height, 0, flags | FPDF_REVERSE_BYTE_ORDER);
+    const int renderFlags = flags | FPDF_REVERSE_BYTE_ORDER;
+    FPDF_PAGE p = reinterpret_cast<FPDF_PAGE>(page);
+    FPDF_RenderPageBitmap(bmp, p, 0, 0, width, height, 0, renderFlags);
+    if (form != 0) {
+        FPDF_FORMHANDLE fh = reinterpret_cast<FPDF_FORMHANDLE>(form);
+        FORM_OnAfterLoadPage(p, fh);
+        FPDF_FFLDraw(fh, bmp, p, 0, 0, width, height, 0, renderFlags);
+        FORM_OnBeforeClosePage(p, fh);
+    }
     FPDFBitmap_Destroy(bmp);
 
     AndroidBitmap_unlockPixels(env, bitmap);

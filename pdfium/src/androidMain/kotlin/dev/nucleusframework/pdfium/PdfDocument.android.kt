@@ -16,6 +16,9 @@ internal actual class PdfDocument internal constructor(
     private val bufferAddr: Long,
     private val bufferSize: Int,
     private val handles: LongArray,
+    // Per-document FPDF_FORMHANDLE (parallel to [handles]). May be 0 if PDFium refused;
+    // render code falls back to no widget overlay in that case.
+    private val formHandles: LongArray,
     private val dispatchers: Array<CoroutineDispatcher>,
     private val executors: Array<ExecutorService>,
 ) {
@@ -64,6 +67,9 @@ internal actual class PdfDocument internal constructor(
             try {
                 val ok = PdfiumBridge.nRenderPageToBitmap(
                     page = page,
+                    // PREVIEW skips form-fill to keep thumbnails cheap; FULL passes the form
+                    // handle so signatures + interactive widgets render correctly.
+                    form = if (quality == RenderQuality.FULL) formHandles[slot] else 0L,
                     bitmap = bitmap,
                     width = widthPx,
                     height = heightPx,
@@ -139,6 +145,8 @@ internal actual class PdfDocument internal constructor(
         runBlocking {
             for (i in handles.indices) {
                 withContext(dispatchers[i]) {
+                    // Form-fill env must be torn down BEFORE its underlying document.
+                    PdfiumBridge.nCloseFormEnv(formHandles[i])
                     PdfiumBridge.nCloseDocument(handles[i])
                 }
             }
@@ -175,7 +183,8 @@ internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?)
             val pairs = Array(POOL_SIZE) { Pdfium.newDispatcher() }
             val dispatchers = Array(POOL_SIZE) { pairs[it].first }
             val executors = Array(POOL_SIZE) { pairs[it].second }
-            PdfDocument(bufferAddr, bytes.size, handles, dispatchers, executors)
+            val formHandles = LongArray(POOL_SIZE) { PdfiumBridge.nInitFormEnv(handles[it]) }
+            PdfDocument(bufferAddr, bytes.size, handles, formHandles, dispatchers, executors)
         } catch (t: Throwable) {
             PdfiumBridge.nFreeBuffer(bufferAddr)
             throw t

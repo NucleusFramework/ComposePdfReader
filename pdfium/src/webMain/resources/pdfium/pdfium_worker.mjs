@@ -20,6 +20,11 @@ M._FPDF_InitLibrary();
 // Track the raw-buffer pointer we allocate for each open document so close() can free
 // it without an extra round-trip.
 const bufferByDoc = new Map();
+// Form-fill environment handle + the FPDF_FORMFILLINFO backing struct per document.
+// PDFium retains a borrowed pointer to the struct for the form handle's lifetime, so
+// both must be freed in lockstep with the document.
+const formByDoc = new Map();
+const formInfoByDoc = new Map();
 
 // ---- low-level helpers ---------------------------------------------------------------
 
@@ -68,6 +73,24 @@ function getMetaText(doc, tag) {
 // ---- operations ----------------------------------------------------------------------
 
 const FPDFBitmap_BGRA = 4;
+const FPDF_ANNOT_FLAG = 0x01;
+// FPDF_FORMFILLINFO is a struct of ~45 function pointers + a leading `int version`. In the
+// WASM32 ABI each is 4 bytes, so 1024 bytes is generous. We zero-fill everything and set
+// only version=2 — that leaves every callback as null, which PDFium treats as a no-op for
+// static (read-only) widget rendering.
+const FORMFILLINFO_SIZE = 1024;
+
+function initFormEnv(doc) {
+    const infoPtr = M._malloc(FORMFILLINFO_SIZE);
+    M.HEAPU8.fill(0, infoPtr, infoPtr + FORMFILLINFO_SIZE);
+    M.HEAP32[infoPtr >> 2] = 2; // FPDF_FORMFILLINFO.version
+    const formHandle = M._FPDFDOC_InitFormFillEnvironment(doc, infoPtr);
+    if (!formHandle) {
+        M._free(infoPtr);
+        return { formHandle: 0, infoPtr: 0 };
+    }
+    return { formHandle, infoPtr };
+}
 
 function openDocument({ buffer, password }) {
     const u8 = new Uint8Array(buffer);
@@ -81,6 +104,11 @@ function openDocument({ buffer, password }) {
             throw new Error('PDFium refused to open document (err=' + M._FPDF_GetLastError() + ')');
         }
         bufferByDoc.set(doc, ptr);
+        const { formHandle, infoPtr } = initFormEnv(doc);
+        if (formHandle) {
+            formByDoc.set(doc, formHandle);
+            formInfoByDoc.set(doc, infoPtr);
+        }
         return {
             result: {
                 doc,
@@ -99,6 +127,15 @@ function openDocument({ buffer, password }) {
 }
 
 function closeDocument({ doc }) {
+    // Form-fill env must be torn down before the document — PDFium dereferences the doc
+    // inside FPDFDOC_ExitFormFillEnvironment.
+    const formHandle = formByDoc.get(doc);
+    if (formHandle) {
+        M._FPDFDOC_ExitFormFillEnvironment(formHandle);
+        formByDoc.delete(doc);
+    }
+    const infoPtr = formInfoByDoc.get(doc);
+    if (infoPtr) { M._free(infoPtr); formInfoByDoc.delete(doc); }
     M._FPDF_CloseDocument(doc);
     const ptr = bufferByDoc.get(doc);
     if (ptr) { M._free(ptr); bufferByDoc.delete(doc); }
@@ -135,6 +172,14 @@ function renderPage({ doc, pageIndex, w, h, flags }) {
         }
         try {
             M._FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, flags);
+            // Form widget overlay (signatures, fillable fields). Only when FPDF_ANNOT is set
+            // (RenderQuality.FULL) — PREVIEW thumbnails skip this extra pass for speed.
+            const formHandle = (flags & FPDF_ANNOT_FLAG) ? formByDoc.get(doc) : 0;
+            if (formHandle) {
+                M._FORM_OnAfterLoadPage(page, formHandle);
+                M._FPDF_FFLDraw(formHandle, bmp, page, 0, 0, w, h, 0, flags);
+                M._FORM_OnBeforeClosePage(page, formHandle);
+            }
             // Detach via .slice so freeing pdfium's buffer below doesn't dangle.
             const pixelBuffer = M.HEAPU8.slice(pixels, pixels + size).buffer;
             return { result: { pixels: pixelBuffer }, transfer: [pixelBuffer] };
