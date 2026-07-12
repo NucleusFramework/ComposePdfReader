@@ -77,3 +77,7 @@ export function pageText(doc, pageIndex) {
 export function pageTextLayout(doc, pageIndex) {
     return rpc('layout', { doc, pageIndex });
 }
+
+export function pageLinks(doc, pageIndex) {
+    return rpc('links', { doc, pageIndex });
+}

@@ -28,6 +28,9 @@ internal expect class PdfDocument {
     /** Extract line-level text rectangles of [pageIndex] for selection overlays. */
     suspend fun pageTextLayout(pageIndex: Int): PageTextLayout
 
+    /** Extract clickable links of [pageIndex]: link annotations + URLs detected in the text. */
+    suspend fun pageLinks(pageIndex: Int): PageLinks
+
     fun close()
 }
 

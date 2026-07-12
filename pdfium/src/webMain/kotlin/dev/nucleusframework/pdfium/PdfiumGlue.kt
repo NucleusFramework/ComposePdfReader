@@ -52,9 +52,20 @@ internal external interface TextLayoutResult : JsAny {
     val charBoxes: Float32Array
 }
 
+internal external interface PageLinksResult : JsAny {
+    val widthPoints: Float
+    val heightPoints: Float
+    /** Entries below this index are link annotations; the rest are text-detected web links. */
+    val annotCount: Int
+    val boxes: Float32Array
+    val uris: JsArray<JsString>
+    val destPages: Int32Array
+}
+
 internal external fun openDocument(buffer: ArrayBuffer, password: String?): Promise<JsAny?>
 internal external fun closeDocument(doc: Int): Promise<JsAny?>
 internal external fun pageSize(doc: Int, pageIndex: Int): Promise<JsAny?>
 internal external fun renderPage(doc: Int, pageIndex: Int, w: Int, h: Int, flags: Int): Promise<JsAny?>
 internal external fun pageText(doc: Int, pageIndex: Int): Promise<JsAny?>
 internal external fun pageTextLayout(doc: Int, pageIndex: Int): Promise<JsAny?>
+internal external fun pageLinks(doc: Int, pageIndex: Int): Promise<JsAny?>

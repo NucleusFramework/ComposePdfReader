@@ -24,6 +24,10 @@ text round it out.
   per-character bounding boxes.
 - **Selectable text overlay** driven by PDFium's per-character boxes, so Ctrl+C
   and long-press copy return the exact PDF text.
+- **Clickable links** — link annotations (URI + internal GoTo) plus URLs and
+  e-mail addresses auto-detected in the page text (`mailto:` links included).
+  External links open through the platform handler, internal links scroll the
+  reader to the destination page.
 - **Cross-platform fit/zoom controls** via a plain state holder.
 
 ## Supported targets
@@ -188,6 +192,36 @@ PdfPage(
 
 Hit-testing uses PDFium's per-character boxes (`FPDFText_GetCharBox`) rather
 than Compose's own font metrics, so selection tracks the rendered glyphs.
+
+### 4b. Clickable links
+
+Links are enabled by default on `PdfPage` and `PdfReader` — nothing to flip.
+Link annotations (`FPDFLink_Enumerate`) and URLs / e-mail addresses detected
+in the page text (`FPDFLink_LoadWebLinks`, e-mails become `mailto:`) turn into
+clickable regions with a hand cursor on desktop. External URIs open through
+`LocalUriHandler`; inside `PdfReader`, internal GoTo links scroll to the
+destination page.
+
+Intercept clicks (analytics, custom navigation, blocking) with `onLinkClick` —
+return `true` to consume the click and skip the default handling:
+
+```kotlin
+PdfReader(
+    state = reader,
+    onLinkClick = { link ->
+        if (link.uri?.startsWith("mailto:") == true) {
+            openCustomComposer(link.uri)
+            true                      // consumed — default handler skipped
+        } else {
+            false                     // fall through to default handling
+        }
+    },
+)
+```
+
+Fetch links programmatically with `reader.pageLinks(pageIndex)` — each
+`PdfLink` carries its bounds in PDF points (origin bottom-left), the target
+`uri` (or `null`), and the 0-based `destPageIndex` (or `-1`).
 
 ### 5. Extract text programmatically
 
@@ -465,6 +499,8 @@ fun PdfPage(
     contentScale: ContentScale = ContentScale.Fit,
     background: Color = Color.White,
     selectableText: Boolean = false,
+    linksEnabled: Boolean = true,
+    onLinkClick: ((PdfLink) -> Boolean)? = null,
 )
 ```
 
@@ -472,6 +508,9 @@ fun PdfPage(
   ratio from the PDF page and sets its own height.
 - `selectableText = true` enables the pointer-driven selection overlay
   described in [step 4](#4-enable-copypaste-and-text-selection).
+- `linksEnabled` / `onLinkClick` control the clickable-links overlay described
+  in [step 4b](#4b-clickable-links). A standalone `PdfPage` has no list to
+  scroll, so internal GoTo links are only actionable through `onLinkClick`.
 
 ### `PdfThumbnail`
 

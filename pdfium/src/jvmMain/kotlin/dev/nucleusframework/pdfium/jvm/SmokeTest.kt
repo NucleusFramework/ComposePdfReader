@@ -38,6 +38,14 @@ fun main(args: Array<String>) = runBlocking {
     println("[kotlin] ImageBitmap ${bmp.width}x${bmp.height}")
     val text = doc.pageText(0)
     println("[kotlin] page0 text length=${text.length} preview=${text.take(60).replace("\n", "⏎")}")
+    val links = doc.pageLinks(0)
+    println("[kotlin] page0 links=${links.links.size}")
+    for (link in links.links) {
+        println(
+            "  uri=${link.uri} dest=${link.destPageIndex} " +
+                "rect=(${link.left}, ${link.bottom}, ${link.right}, ${link.top})",
+        )
+    }
 
     // Concurrency stress: fan out N parallel render+text+size calls, mirroring the sample app.
     println("[stress] launching 64 parallel render+text+size calls…")

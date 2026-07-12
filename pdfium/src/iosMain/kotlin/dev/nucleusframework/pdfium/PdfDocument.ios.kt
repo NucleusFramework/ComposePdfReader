@@ -38,6 +38,27 @@ import dev.nucleusframework.pdfium.native.FPDF_LoadPage
 import dev.nucleusframework.pdfium.native.FPDF_RenderPageBitmap
 import cnames.structs.fpdf_document_t__
 import cnames.structs.fpdf_form_handle_t__
+import cnames.structs.fpdf_link_t__
+import dev.nucleusframework.pdfium.native.FPDFAction_GetDest
+import dev.nucleusframework.pdfium.native.FPDFAction_GetType
+import dev.nucleusframework.pdfium.native.FPDFAction_GetURIPath
+import dev.nucleusframework.pdfium.native.FPDFDest_GetDestPageIndex
+import dev.nucleusframework.pdfium.native.FPDFLink_CloseWebLinks
+import dev.nucleusframework.pdfium.native.FPDFLink_CountRects
+import dev.nucleusframework.pdfium.native.FPDFLink_CountWebLinks
+import dev.nucleusframework.pdfium.native.FPDFLink_Enumerate
+import dev.nucleusframework.pdfium.native.FPDFLink_GetAction
+import dev.nucleusframework.pdfium.native.FPDFLink_GetAnnotRect
+import dev.nucleusframework.pdfium.native.FPDFLink_GetDest
+import dev.nucleusframework.pdfium.native.FPDFLink_GetRect
+import dev.nucleusframework.pdfium.native.FPDFLink_GetURL
+import dev.nucleusframework.pdfium.native.FPDFLink_LoadWebLinks
+import dev.nucleusframework.pdfium.native.FS_RECTF
+import dev.nucleusframework.pdfium.native.PDFACTION_GOTO
+import dev.nucleusframework.pdfium.native.PDFACTION_UNSUPPORTED
+import dev.nucleusframework.pdfium.native.PDFACTION_URI
+import kotlinx.cinterop.CPointerVar
+import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.nativeHeap
 import kotlin.concurrent.AtomicReference
 import kotlinx.cinterop.ByteVar
@@ -252,6 +273,101 @@ internal actual class PdfDocument(
             } finally {
                 FPDFText_ClosePage(textPage)
             }
+        } finally {
+            FPDF_ClosePage(page)
+        }
+    }
+
+    actual suspend fun pageLinks(pageIndex: Int): PageLinks = withContext(pdfiumDispatcher) {
+        val page = FPDF_LoadPage(handle, pageIndex) ?: return@withContext PageLinks.Empty
+        try {
+            val size = PageSize(
+                widthPoints = FPDF_GetPageWidthF(page),
+                heightPoints = FPDF_GetPageHeightF(page),
+            )
+            val annotationLinks = ArrayList<PdfLink>()
+            val webLinks = ArrayList<PdfLink>()
+            memScoped {
+                // Link annotations.
+                val pos = alloc<IntVar>()
+                pos.value = 0
+                val linkVar = alloc<CPointerVar<fpdf_link_t__>>()
+                while (FPDFLink_Enumerate(page, pos.ptr, linkVar.ptr) != 0) {
+                    val link = linkVar.value ?: continue
+                    val rect = alloc<FS_RECTF>()
+                    if (FPDFLink_GetAnnotRect(link, rect.ptr) == 0) continue
+                    val action = FPDFLink_GetAction(link)
+                    val type = if (action != null) FPDFAction_GetType(action).toInt() else PDFACTION_UNSUPPORTED
+                    var uri: String? = null
+                    var destPage = -1
+                    if (type == PDFACTION_URI) {
+                        // URI path is a NUL-terminated byte string (7-bit ASCII per PDF spec).
+                        val len = FPDFAction_GetURIPath(handle, action, null, 0.convert()).toInt()
+                        if (len > 1) {
+                            val buf = allocArray<ByteVar>(len)
+                            FPDFAction_GetURIPath(handle, action, buf, len.convert())
+                            val bytes = ByteArray(len - 1)
+                            for (i in bytes.indices) bytes[i] = buf[i]
+                            uri = bytes.decodeToString().trimEnd('\u0000').ifEmpty { null }
+                        }
+                    } else {
+                        var dest = FPDFLink_GetDest(handle, link)
+                        if (dest == null && type == PDFACTION_GOTO && action != null) {
+                            dest = FPDFAction_GetDest(handle, action)
+                        }
+                        if (dest != null) destPage = FPDFDest_GetDestPageIndex(handle, dest)
+                    }
+                    if (uri == null && destPage < 0) continue // nothing actionable
+                    annotationLinks.add(
+                        PdfLink(rect.left, rect.bottom, rect.right, rect.top, uri, destPage),
+                    )
+                }
+                // Web links: URLs + e-mails (as mailto:) detected in the page text.
+                val textPage = FPDFText_LoadPage(page)
+                if (textPage != null) {
+                    try {
+                        val pageLink = FPDFLink_LoadWebLinks(textPage)
+                        if (pageLink != null) {
+                            try {
+                                val l = alloc<DoubleVar>()
+                                val t = alloc<DoubleVar>()
+                                val r = alloc<DoubleVar>()
+                                val b = alloc<DoubleVar>()
+                                val count = FPDFLink_CountWebLinks(pageLink)
+                                for (i in 0 until count) {
+                                    val len = FPDFLink_GetURL(pageLink, i, null, 0)
+                                    if (len <= 1) continue
+                                    val buf = allocArray<UShortVar>(len)
+                                    FPDFLink_GetURL(pageLink, i, buf, len)
+                                    val chars = CharArray(len - 1)
+                                    for (j in chars.indices) chars[j] = buf[j].toInt().toChar()
+                                    val uri = chars.concatToString().trim('\u0000')
+                                    if (uri.isEmpty()) continue
+                                    // A URL wrapping across lines yields one rect per line.
+                                    val rects = FPDFLink_CountRects(pageLink, i)
+                                    for (ri in 0 until rects) {
+                                        if (FPDFLink_GetRect(pageLink, i, ri, l.ptr, t.ptr, r.ptr, b.ptr) == 0) continue
+                                        webLinks.add(
+                                            PdfLink(
+                                                left = l.value.toFloat(),
+                                                bottom = b.value.toFloat(),
+                                                right = r.value.toFloat(),
+                                                top = t.value.toFloat(),
+                                                uri = uri,
+                                            ),
+                                        )
+                                    }
+                                }
+                            } finally {
+                                FPDFLink_CloseWebLinks(pageLink)
+                            }
+                        }
+                    } finally {
+                        FPDFText_ClosePage(textPage)
+                    }
+                }
+            }
+            buildPageLinks(pageIndex, size, annotationLinks, webLinks)
         } finally {
             FPDF_ClosePage(page)
         }

@@ -293,6 +293,136 @@ function pageTextLayout({ doc, pageIndex }) {
     }
 }
 
+// PDFACTION_* types from fpdf_doc.h.
+const PDFACTION_GOTO = 1;
+const PDFACTION_URI = 3;
+
+function pageLinks({ doc, pageIndex }) {
+    const page = M._FPDF_LoadPage(doc, pageIndex);
+    if (!page) return { result: emptyLinks() };
+    try {
+        const widthPoints = M._FPDF_GetPageWidthF(page);
+        const heightPoints = M._FPDF_GetPageHeightF(page);
+        // Flat accumulators: 4 floats per link (left, bottom, right, top in PDF points).
+        // Annotation links are pushed first, then text-detected web links — `annotCount`
+        // lets the Kotlin side keep the two apart for overlap de-duplication.
+        const boxes = [];
+        const uris = [];
+        const destPages = [];
+        let annotCount = 0;
+        const scratch = M._malloc(32); // pos+link ptrs / FS_RECTF / 4 × f64 web rect
+        try {
+            // ---- link annotations ----
+            const posPtr = scratch;      // int
+            const linkPtr = scratch + 4; // FPDF_LINK*
+            M.HEAP32[posPtr >> 2] = 0;
+            while (M._FPDFLink_Enumerate(page, posPtr, linkPtr)) {
+                const link = M.HEAPU32[linkPtr >> 2];
+                if (!link) continue;
+                const rectPtr = scratch + 8; // FS_RECTF: left, top, right, bottom (4 × f32)
+                if (!M._FPDFLink_GetAnnotRect(link, rectPtr)) continue;
+                const left = M.HEAPF32[rectPtr >> 2];
+                const top = M.HEAPF32[(rectPtr >> 2) + 1];
+                const right = M.HEAPF32[(rectPtr >> 2) + 2];
+                const bottom = M.HEAPF32[(rectPtr >> 2) + 3];
+                let uri = null;
+                let destPage = -1;
+                const action = M._FPDFLink_GetAction(link);
+                const type = action ? M._FPDFAction_GetType(action) : 0;
+                if (type === PDFACTION_URI) {
+                    const len = M._FPDFAction_GetURIPath(doc, action, 0, 0);
+                    if (len > 1) {
+                        const buf = M._malloc(len);
+                        try {
+                            M._FPDFAction_GetURIPath(doc, action, buf, len);
+                            // NUL-terminated byte string (7-bit ASCII per PDF spec).
+                            const bytes = M.HEAPU8.subarray(buf, buf + len);
+                            let end = bytes.indexOf(0);
+                            if (end < 0) end = len;
+                            uri = new TextDecoder().decode(bytes.subarray(0, end)) || null;
+                        } finally {
+                            M._free(buf);
+                        }
+                    }
+                } else {
+                    let dest = M._FPDFLink_GetDest(doc, link);
+                    if (!dest && type === PDFACTION_GOTO && action) dest = M._FPDFAction_GetDest(doc, action);
+                    if (dest) destPage = M._FPDFDest_GetDestPageIndex(doc, dest);
+                }
+                if (uri == null && destPage < 0) continue; // nothing actionable
+                boxes.push(left, bottom, right, top);
+                uris.push(uri);
+                destPages.push(destPage);
+            }
+            annotCount = uris.length;
+            // ---- web links: URLs + e-mails (as mailto:) detected in the page text ----
+            const tp = M._FPDFText_LoadPage(page);
+            if (tp) {
+                try {
+                    const pageLink = M._FPDFLink_LoadWebLinks(tp);
+                    if (pageLink) {
+                        try {
+                            const n = M._FPDFLink_CountWebLinks(pageLink);
+                            for (let i = 0; i < n; i++) {
+                                const len = M._FPDFLink_GetURL(pageLink, i, 0, 0);
+                                if (len <= 1) continue;
+                                const buf = M._malloc(len * 2);
+                                let uri;
+                                try {
+                                    M._FPDFLink_GetURL(pageLink, i, buf, len);
+                                    uri = readUtf16LEFromPtr(buf, len - 1).replace(/\0+$/, '');
+                                } finally {
+                                    M._free(buf);
+                                }
+                                if (!uri) continue;
+                                // A URL wrapping across lines yields one rect per line.
+                                const rects = M._FPDFLink_CountRects(pageLink, i);
+                                for (let r = 0; r < rects; r++) {
+                                    if (!M._FPDFLink_GetRect(pageLink, i, r, scratch, scratch + 8, scratch + 16, scratch + 24)) continue;
+                                    const dv = new DataView(M.HEAPU8.buffer, scratch, 32);
+                                    boxes.push(
+                                        dv.getFloat64(0, true),  // left
+                                        dv.getFloat64(24, true), // bottom
+                                        dv.getFloat64(16, true), // right
+                                        dv.getFloat64(8, true),  // top
+                                    );
+                                    uris.push(uri);
+                                    destPages.push(-1);
+                                }
+                            }
+                        } finally {
+                            M._FPDFLink_CloseWebLinks(pageLink);
+                        }
+                    }
+                } finally {
+                    M._FPDFText_ClosePage(tp);
+                }
+            }
+        } finally {
+            M._free(scratch);
+        }
+        const boxesArr = new Float32Array(boxes);
+        const destArr = new Int32Array(destPages);
+        return {
+            result: { widthPoints, heightPoints, annotCount, boxes: boxesArr, uris, destPages: destArr },
+            transfer: [boxesArr.buffer, destArr.buffer],
+        };
+    } finally {
+        M._FPDF_ClosePage(page);
+    }
+}
+
+function emptyLinks(widthPoints = 0, heightPoints = 0) {
+    return {
+        widthPoints,
+        heightPoints,
+        annotCount: 0,
+        boxes: new Float32Array(0),
+        uris: [],
+        destPages: new Int32Array(0),
+    };
+}
+
 function emptyLayout(widthPoints = 0, heightPoints = 0) {
     return {
         widthPoints,
@@ -313,6 +443,7 @@ const handlers = {
     render: renderPage,
     text: pageText,
     layout: pageTextLayout,
+    links: pageLinks,
 };
 
 self.onmessage = (e) => {
