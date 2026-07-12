@@ -58,6 +58,27 @@ internal actual class PdfDocument internal constructor(
         return PageTextLayout(pageIndex, size, rectBoxes, rectTexts, charCodepoints, charBoxes)
     }
 
+    actual suspend fun pageLinks(pageIndex: Int): PageLinks {
+        val r = pageLinks(docPtr, pageIndex).awaitTyped<PageLinksResult>()
+        val size = PageSize(r.widthPoints, r.heightPoints)
+        val boxes = r.boxes.toSharedFloatArray()
+        val destPages = r.destPages.toSharedIntArray()
+        val annotationLinks = ArrayList<PdfLink>(r.annotCount)
+        val webLinks = ArrayList<PdfLink>()
+        for (i in 0 until destPages.size) {
+            val link = PdfLink(
+                left = boxes[i * 4],
+                bottom = boxes[i * 4 + 1],
+                right = boxes[i * 4 + 2],
+                top = boxes[i * 4 + 3],
+                uri = r.uris[i]?.toString(),
+                destPageIndex = destPages[i],
+            )
+            if (i < r.annotCount) annotationLinks.add(link) else webLinks.add(link)
+        }
+        return buildPageLinks(pageIndex, size, annotationLinks, webLinks)
+    }
+
     actual fun close() {
         // Fire-and-forget; the worker frees both the doc handle and the buffer ptr.
         closeDocument(docPtr)

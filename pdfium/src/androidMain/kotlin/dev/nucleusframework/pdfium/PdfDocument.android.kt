@@ -141,6 +141,31 @@ internal actual class PdfDocument internal constructor(
         }
     }
 
+    actual suspend fun pageLinks(pageIndex: Int): PageLinks {
+        val slot = pickSlot()
+        return withContext(dispatchers[slot]) {
+            val handle = handles[slot]
+            val page = PdfiumBridge.nLoadPage(handle, pageIndex)
+            if (page == 0L) return@withContext PageLinks.Empty
+            try {
+                val size = PageSize(
+                    widthPoints = PdfiumBridge.nGetPageWidth(page),
+                    heightPoints = PdfiumBridge.nGetPageHeight(page),
+                )
+                val count = PdfiumBridge.nCountPageLinks(handle, page)
+                if (count <= 0) return@withContext PageLinks(pageIndex, size, emptyList())
+                val boxes = FloatArray(count * 4)
+                val uris = arrayOfNulls<String>(count)
+                val destPages = IntArray(count)
+                val isWeb = BooleanArray(count)
+                val written = PdfiumBridge.nExtractPageLinks(handle, page, boxes, uris, destPages, isWeb)
+                pageLinksFromArrays(pageIndex, size, boxes, uris, destPages, isWeb, written)
+            } finally {
+                PdfiumBridge.nClosePage(page)
+            }
+        }
+    }
+
     actual fun close() {
         runBlocking {
             for (i in handles.indices) {

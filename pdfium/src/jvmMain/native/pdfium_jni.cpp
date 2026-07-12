@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "fpdfview.h"
 #include "fpdf_doc.h"
@@ -64,6 +65,103 @@ std::string readMeta(FPDF_DOCUMENT doc, const char* tag) {
 jstring toJString(JNIEnv* env, const std::string& s) {
     if (s.empty()) return nullptr;
     return env->NewStringUTF(s.c_str());
+}
+
+// UTF-16 → UTF-8 (BMP + surrogate pair support).
+std::string utf16ToUtf8(const std::u16string& in) {
+    std::string utf8;
+    utf8.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        char16_t c = in[i];
+        if (c < 0x80) {
+            utf8.push_back(static_cast<char>(c));
+        } else if (c < 0x800) {
+            utf8.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            utf8.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < in.size()
+                   && in[i + 1] >= 0xDC00 && in[i + 1] <= 0xDFFF) {
+            uint32_t cp = 0x10000 + ((c - 0xD800u) << 10) + (in[i + 1] - 0xDC00u);
+            utf8.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            utf8.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            utf8.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            utf8.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            ++i;
+        } else {
+            utf8.push_back(static_cast<char>(0xE0 | (c >> 12)));
+            utf8.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+            utf8.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+    }
+    return utf8;
+}
+
+// One clickable region on a page. `web` marks entries produced by PDFium's text scanner
+// (FPDFLink_LoadWebLinks) as opposed to real link annotations.
+struct LinkEntry {
+    float left, bottom, right, top;
+    std::string uri;   // UTF-8, empty if none
+    int destPage;      // 0-based target page for GoTo links, -1 if none
+    bool web;
+};
+
+// Collect link annotations, then text-detected web links (URLs + mailto: for e-mails).
+// De-duplication of overlapping entries is done on the Kotlin side.
+void collectPageLinks(FPDF_DOCUMENT doc, FPDF_PAGE page, std::vector<LinkEntry>& out) {
+    int pos = 0;
+    FPDF_LINK link = nullptr;
+    while (FPDFLink_Enumerate(page, &pos, &link)) {
+        if (!link) continue;
+        FS_RECTF rect{};
+        if (!FPDFLink_GetAnnotRect(link, &rect)) continue;
+        LinkEntry e{rect.left, rect.bottom, rect.right, rect.top, {}, -1, false};
+        FPDF_ACTION action = FPDFLink_GetAction(link);
+        unsigned long type = action ? FPDFAction_GetType(action) : PDFACTION_UNSUPPORTED;
+        if (type == PDFACTION_URI) {
+            unsigned long len = FPDFAction_GetURIPath(doc, action, nullptr, 0);
+            if (len > 1) {
+                // URI path is a NUL-terminated byte string (7-bit ASCII per PDF spec).
+                std::string buf(len, '\0');
+                FPDFAction_GetURIPath(doc, action, buf.data(), len);
+                while (!buf.empty() && buf.back() == '\0') buf.pop_back();
+                e.uri = buf;
+            }
+        } else {
+            FPDF_DEST dest = FPDFLink_GetDest(doc, link);
+            if (!dest && type == PDFACTION_GOTO) dest = FPDFAction_GetDest(doc, action);
+            if (dest) e.destPage = FPDFDest_GetDestPageIndex(doc, dest);
+        }
+        if (e.uri.empty() && e.destPage < 0) continue; // nothing actionable
+        out.push_back(std::move(e));
+    }
+
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(page);
+    if (!tp) return;
+    FPDF_PAGELINK webLinks = FPDFLink_LoadWebLinks(tp);
+    if (webLinks) {
+        int n = FPDFLink_CountWebLinks(webLinks);
+        for (int i = 0; i < n; ++i) {
+            int len = FPDFLink_GetURL(webLinks, i, nullptr, 0);
+            if (len <= 1) continue;
+            std::u16string buf(static_cast<size_t>(len), u'\0');
+            FPDFLink_GetURL(webLinks, i, reinterpret_cast<unsigned short*>(buf.data()), len);
+            while (!buf.empty() && buf.back() == u'\0') buf.pop_back();
+            std::string uri = utf16ToUtf8(buf);
+            if (uri.empty()) continue;
+            // A URL wrapping across lines yields one rect per line — each is clickable.
+            int rects = FPDFLink_CountRects(webLinks, i);
+            for (int r = 0; r < rects; ++r) {
+                double left = 0, top = 0, right = 0, bottom = 0;
+                if (!FPDFLink_GetRect(webLinks, i, r, &left, &top, &right, &bottom)) continue;
+                out.push_back(LinkEntry{
+                    static_cast<float>(left), static_cast<float>(bottom),
+                    static_cast<float>(right), static_cast<float>(top),
+                    uri, -1, true,
+                });
+            }
+        }
+        FPDFLink_CloseWebLinks(webLinks);
+    }
+    FPDFText_ClosePage(tp);
 }
 
 } // namespace
@@ -485,6 +583,56 @@ Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nExtractCharBoxes(
     env->ReleaseIntArrayElements(outCodepoints, codepoints, 0);
     env->ReleaseFloatArrayElements(outBoxes, boxes, 0);
     FPDFText_ClosePage(tp);
+    return count;
+}
+
+/**
+ * Count the clickable link entries on [page]: link annotations plus one entry per rect of
+ * every text-detected web link. Requires [doc] to resolve GoTo destinations.
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nCountPageLinks(
+        JNIEnv*, jclass, jlong doc, jlong page) {
+    if (doc == 0 || page == 0) return 0;
+    std::vector<LinkEntry> links;
+    collectPageLinks(reinterpret_cast<FPDF_DOCUMENT>(doc), reinterpret_cast<FPDF_PAGE>(page), links);
+    return static_cast<jint>(links.size());
+}
+
+/**
+ * Fill caller-sized arrays with link data: [outBoxes] holds 4 floats per link (left, bottom,
+ * right, top in PDF page points), [outUris] the UTF-8 target URI or null, [outDestPages] the
+ * 0-based GoTo target page or -1, and [outIsWeb] whether the entry was text-detected rather
+ * than a link annotation. Returns the number of links written.
+ */
+JNIEXPORT jint JNICALL
+Java_dev_nucleusframework_pdfium_jvm_PdfiumBridge_nExtractPageLinks(
+        JNIEnv* env, jclass, jlong doc, jlong page,
+        jfloatArray outBoxes, jobjectArray outUris, jintArray outDestPages, jbooleanArray outIsWeb) {
+    if (doc == 0 || page == 0) return 0;
+    std::vector<LinkEntry> links;
+    collectPageLinks(reinterpret_cast<FPDF_DOCUMENT>(doc), reinterpret_cast<FPDF_PAGE>(page), links);
+    int capacity = env->GetArrayLength(outBoxes) / 4;
+    int count = static_cast<int>(links.size()) < capacity ? static_cast<int>(links.size()) : capacity;
+    if (count == 0) return 0;
+    jfloat* boxes = env->GetFloatArrayElements(outBoxes, nullptr);
+    jint* destPages = env->GetIntArrayElements(outDestPages, nullptr);
+    jboolean* isWeb = env->GetBooleanArrayElements(outIsWeb, nullptr);
+    for (int i = 0; i < count; ++i) {
+        const LinkEntry& e = links[i];
+        boxes[i * 4 + 0] = e.left;
+        boxes[i * 4 + 1] = e.bottom;
+        boxes[i * 4 + 2] = e.right;
+        boxes[i * 4 + 3] = e.top;
+        destPages[i] = e.destPage;
+        isWeb[i] = e.web ? JNI_TRUE : JNI_FALSE;
+        jstring js = toJString(env, e.uri);
+        env->SetObjectArrayElement(outUris, i, js);
+        if (js) env->DeleteLocalRef(js);
+    }
+    env->ReleaseFloatArrayElements(outBoxes, boxes, 0);
+    env->ReleaseIntArrayElements(outDestPages, destPages, 0);
+    env->ReleaseBooleanArrayElements(outIsWeb, isWeb, 0);
     return count;
 }
 

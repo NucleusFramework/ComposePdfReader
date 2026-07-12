@@ -58,6 +58,21 @@ internal object PdfiumBridge {
         outCodepoints: IntArray,
         outBoxes: FloatArray,
     ): Int
+    /** Count of clickable links (annotations + text-detected web-link rects) on the page. */
+    @JvmStatic external fun nCountPageLinks(doc: Long, page: Long): Int
+    /**
+     * Fill pre-sized arrays with link data: [outBoxes] holds 4 floats per link (left, bottom,
+     * right, top in points), [outUris] the target URI or null, [outDestPages] the 0-based
+     * GoTo target page or -1, [outIsWeb] whether the link was text-detected.
+     */
+    @JvmStatic external fun nExtractPageLinks(
+        doc: Long,
+        page: Long,
+        outBoxes: FloatArray,
+        outUris: Array<String?>,
+        outDestPages: IntArray,
+        outIsWeb: BooleanArray,
+    ): Int
 
     @JvmStatic external fun nAllocBuffer(data: ByteArray): Long
     @JvmStatic external fun nFreeBuffer(address: Long)

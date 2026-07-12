@@ -133,6 +133,7 @@ private fun ContinuousReader(state: ReaderScreenState) {
                             entry = entry,
                             pageWidth = pageWidth,
                             isDouble = isDouble,
+                            onNavigateToPage = state::jumpToPage,
                         )
                     }
                 }
@@ -192,12 +193,13 @@ private fun SpreadRow(
     entry: SpreadEntry,
     pageWidth: Dp,
     isDouble: Boolean,
+    onNavigateToPage: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (!isDouble) {
         Column(modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally)) {
             PageLabel(entry.first)
-            PageCard(reader = reader, pageIndex = entry.first, width = pageWidth)
+            PageCard(reader = reader, pageIndex = entry.first, width = pageWidth, onNavigateToPage = onNavigateToPage)
         }
         return
     }
@@ -205,12 +207,12 @@ private fun SpreadRow(
         Row(horizontalArrangement = Arrangement.spacedBy(PAGE_GAP)) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 PageLabel(entry.first)
-                PageCard(reader = reader, pageIndex = entry.first, width = pageWidth)
+                PageCard(reader = reader, pageIndex = entry.first, width = pageWidth, onNavigateToPage = onNavigateToPage)
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (entry.second != null) {
                     PageLabel(entry.second)
-                    PageCard(reader = reader, pageIndex = entry.second, width = pageWidth)
+                    PageCard(reader = reader, pageIndex = entry.second, width = pageWidth, onNavigateToPage = onNavigateToPage)
                 } else {
                     // Phantom slot for odd last-page: keeps the row width stable.
                     Box(Modifier.width(pageWidth))
@@ -234,6 +236,7 @@ private fun PageCard(
     reader: PdfReaderState,
     pageIndex: Int,
     width: Dp,
+    onNavigateToPage: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -249,6 +252,16 @@ private fun PageCard(
             modifier = Modifier.fillMaxWidth(),
             background = Color.White,
             selectableText = true,
+            onLinkClick = { link ->
+                // Internal GoTo links jump within the document; URIs fall through to the
+                // default handler (platform browser / mail client).
+                if (link.destPageIndex >= 0) {
+                    onNavigateToPage(link.destPageIndex)
+                    true
+                } else {
+                    false
+                }
+            },
         )
     }
 }

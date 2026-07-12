@@ -2,14 +2,18 @@ package dev.nucleusframework.pdfium
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,12 +39,16 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.max
 import kotlin.math.min
@@ -61,6 +69,13 @@ import kotlinx.coroutines.launch
  * selection here is driven directly by PDFium's per-character bounding boxes
  * (`FPDFText_GetCharBox`), so the hit region of every glyph matches the rendered pixels
  * pixel-for-pixel — the same approach Chrome and PDF.js use.
+ *
+ * When [linksEnabled] is true (the default), the page's links — link annotations plus URLs
+ * and e-mail addresses detected in the text — become clickable. [onLinkClick] intercepts
+ * every activation first; returning `true` consumes the click. Otherwise external links
+ * ([PdfLink.uri]) open through [LocalUriHandler]. Internal GoTo links ([PdfLink.destPageIndex])
+ * are only actionable through [onLinkClick] — [PdfReader] wires them to scroll to the target
+ * page; standalone [PdfPage] usages must handle them in the callback.
  */
 @OptIn(FlowPreview::class)
 @Composable
@@ -71,6 +86,8 @@ fun PdfPage(
     contentScale: ContentScale = ContentScale.Fit,
     background: Color = Color.White,
     selectableText: Boolean = false,
+    linksEnabled: Boolean = true,
+    onLinkClick: ((PdfLink) -> Boolean)? = null,
 ) {
     var size by remember { mutableStateOf(IntSize.Zero) }
     var pageSize by remember(pageIndex, state.pageCount) { mutableStateOf<PageSize?>(null) }
@@ -86,6 +103,13 @@ fun PdfPage(
     if (selectableText) {
         LaunchedEffect(pageIndex, state.pageCount) {
             textLayout = state.pageTextLayout(pageIndex)
+        }
+    }
+
+    var links by remember(pageIndex, linksEnabled, state.pageCount) { mutableStateOf<PageLinks?>(null) }
+    if (linksEnabled) {
+        LaunchedEffect(pageIndex, state.pageCount) {
+            links = state.pageLinks(pageIndex)
         }
     }
 
@@ -139,6 +163,62 @@ fun PdfPage(
         val pl = textLayout
         if (selectableText && pl != null && pl.charCount > 0) {
             TextSelectionLayer(layout = pl, modifier = Modifier.fillMaxSize())
+        }
+        val lks = links
+        if (linksEnabled && lks != null && lks.links.isNotEmpty()) {
+            // Above the selection layer so link clicks win over selection anchoring.
+            LinkLayer(links = lks, onLinkClick = onLinkClick, modifier = Modifier.fillMaxSize())
+        }
+    }
+}
+
+/**
+ * Clickable regions over the page's links. Each link is an invisible [Box] positioned at
+ * the link rect (PDF points → container px), with a hand cursor on desktop and click
+ * semantics for accessibility. Using `clickable` (instead of raw pointer handling) keeps
+ * the scroll interplay correct: a touch scroll started on a link still scrolls the list.
+ */
+@Composable
+private fun LinkLayer(
+    links: PageLinks,
+    onLinkClick: ((PdfLink) -> Boolean)?,
+    modifier: Modifier = Modifier,
+) {
+    val uriHandler = LocalUriHandler.current
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        val containerW = with(density) { maxWidth.roundToPx() }.toFloat()
+        val containerH = with(density) { maxHeight.roundToPx() }.toFloat()
+        val pageW = links.pageSize.widthPoints
+        val pageH = links.pageSize.heightPoints
+        if (pageW <= 0f || pageH <= 0f || containerW <= 0f || containerH <= 0f) return@BoxWithConstraints
+        val scaleX = containerW / pageW
+        val scaleY = containerH / pageH
+
+        for (link in links.links) {
+            val leftPx = link.left * scaleX
+            val topPx = containerH - link.top * scaleY
+            val widthPx = (link.right - link.left) * scaleX
+            val heightPx = (link.top - link.bottom) * scaleY
+            if (widthPx <= 0f || heightPx <= 0f) continue
+            Box(
+                Modifier
+                    .offset { IntOffset(leftPx.roundToInt(), topPx.roundToInt()) }
+                    .size(
+                        width = with(density) { widthPx.toDp() },
+                        height = with(density) { heightPx.toDp() },
+                    )
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClickLabel = link.uri,
+                    ) {
+                        if (onLinkClick?.invoke(link) != true) {
+                            link.uri?.let { uri -> runCatching { uriHandler.openUri(uri) } }
+                        }
+                    },
+            )
         }
     }
 }

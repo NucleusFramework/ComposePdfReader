@@ -138,6 +138,13 @@ class PdfReaderState internal constructor(
         return doc.pageTextLayout(pageIndex)
     }
 
+    /** Clickable links of a page (annotations + text-detected URLs), or null if not open. */
+    suspend fun pageLinks(pageIndex: Int): PageLinks? {
+        val doc = document ?: return null
+        if (pageIndex !in 0 until pageCount) return null
+        return doc.pageLinks(pageIndex)
+    }
+
     fun dispose() {
         scope.launch {
             openMutex.withLock {
