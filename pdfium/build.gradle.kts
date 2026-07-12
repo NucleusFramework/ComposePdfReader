@@ -26,10 +26,16 @@ plugins {
     alias(libs.plugins.vanniktechMavenPublish)
 }
 
+// Explicit -PpublishVersion wins (used by the auto-release inline publish, where the
+// GITHUB_REF default variable cannot be overridden). Otherwise derive from a release
+// tag ref; non-tag refs (refs/heads/…) fall back to the dev version instead of
+// producing an invalid version containing '/'.
 val publishVersion: String =
-    providers.environmentVariable("GITHUB_REF")
-        .orNull
-        ?.removePrefix("refs/tags/v")
+    providers.gradleProperty("publishVersion").orNull
+        ?: providers.environmentVariable("GITHUB_REF")
+            .orNull
+            ?.takeIf { it.startsWith("refs/tags/v") }
+            ?.removePrefix("refs/tags/v")
         ?: "0.1.0"
 
 group = "dev.nucleusframework"
