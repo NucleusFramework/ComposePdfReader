@@ -170,6 +170,16 @@ jobs:
           git tag "$tag"
           git push origin "$tag"
 
+      - name: Create GitHub release
+        # Tags pushed with GITHUB_TOKEN don't trigger other workflows (including
+        # release-graalvm.yaml), so the release must be created here explicitly.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.detect.outputs.full_version }}"
+          gh release create "$tag" --title "$tag" --generate-notes
+
       - name: Delete bump branch
         run: git push origin --delete "${{ needs.detect.outputs.branch }}" || true
 
