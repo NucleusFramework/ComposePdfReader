@@ -170,6 +170,16 @@ jobs:
           git tag "$tag"
           git push origin "$tag"
 
+      - name: Create GitHub release
+        # Tags pushed with GITHUB_TOKEN don't trigger other workflows (including
+        # release-graalvm.yaml), so the release must be created here explicitly.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.detect.outputs.full_version }}"
+          gh release create "$tag" --title "$tag" --generate-notes
+
       - name: Delete bump branch
         run: git push origin --delete "${{ needs.detect.outputs.branch }}" || true
 
@@ -211,15 +221,18 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
 
       - name: Publish to Maven Central
-        # GITHUB_REF override drives pdfium/build.gradle.kts publishVersion (reads
-        # GITHUB_REF and strips refs/tags/v). The tag was pushed by GITHUB_TOKEN
-        # so publish-maven.yaml will not fire — publishing inline avoids the
-        # recursive-trigger gap and keeps everything in one run.
+        # -PpublishVersion drives pdfium/build.gradle.kts publishVersion — the GITHUB_REF
+        # default variable cannot be overridden via `env:` (the runner re-applies it), which
+        # silently produced an invalid 'refs/heads/master' version and broke every inline
+        # publish. The tag was pushed by GITHUB_TOKEN so publish-maven.yaml will not fire —
+        # publishing inline avoids the recursive-trigger gap and keeps everything in one run.
         env:
-          GITHUB_REF: refs/tags/v${{ needs.detect.outputs.full_version }}
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVENCENTRALUSERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVENCENTRALPASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNINGINMEMORYKEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNINGKEYID }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNINGPASSWORD }}
-        run: ./gradlew :pdfium:publishAndReleaseToMavenCentral --no-configuration-cache
+        run: >
+          ./gradlew :pdfium:publishAndReleaseToMavenCentral
+          -PpublishVersion=${{ needs.detect.outputs.full_version }}
+          --no-configuration-cache
