@@ -224,9 +224,9 @@ internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?)
             for (i in 0 until POOL_SIZE) {
                 val h = PdfiumBridge.nOpenDocumentFromMemory(bufferAddr, bytes.size.toLong(), password)
                 if (h == 0L) {
-                    // Cleanup previously opened handles + buffer on failure.
+                    // Cleanup previously opened handles. The buffer is freed by the catch
+                    // below — freeing it here too double-frees it (native abort).
                     for (j in 0 until i) PdfiumBridge.nCloseDocument(handles[j])
-                    PdfiumBridge.nFreeBuffer(bufferAddr)
                     error("PDFium refused to open document (err=${PdfiumBridge.nGetLastError()})")
                 }
                 handles[i] = h
