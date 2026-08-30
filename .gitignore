@@ -20,6 +20,9 @@ node_modules/
 *.so
 *.dylib
 *.dll
+# Windows import libraries staged by :pdfium:installPdfiumJvmResources — `*.dll`
+# doesn't match `pdfium.dll.lib`, which is why they used to be committed.
+*.dll.lib
 
 # iOS PDFium static archives staged by :pdfium:installPdfiumIos from the
 # paulocoutinhox/pdfium-lib release. Redownloaded on every build.

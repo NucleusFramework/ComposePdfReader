@@ -605,7 +605,11 @@ abstract class PackagedBinariesArgumentProvider : CommandLineArgumentProvider {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val webRoots: ConfigurableFileCollection
 
+    @get:Input
+    abstract val iosSupported: Property<Boolean>
+
     override fun asArguments(): MutableIterable<String> = mutableListOf(
+        "-Dpdfium.ios.supported=${iosSupported.get()}",
         "-Dpdfium.ios.cinterop.klibs=${iosKlibs.files.joinToString(File.pathSeparator)}",
         "-Dpdfium.web.klibs=${webRoots.files.joinToString(File.pathSeparator)}",
     )
@@ -625,6 +629,11 @@ val iosCinteropKlibTaskNames = listOf(
     "iosSimulatorArm64Cinterop-pdfiumKlib",
 )
 
+// KGP disables cross compilation for targets that declare cinterops, so the iOS
+// klibs simply don't exist off a macOS host. The web half still runs everywhere;
+// the iOS half is covered by the `packaging-ios` CI job and by the publish run.
+val iosPackagingSupported = Os.isFamily(Os.FAMILY_MAC)
+
 tasks.register<Test>("packagingTest") {
     group = "verification"
     description = "Assert iOS/web PDFium binaries are packaged into published klibs (issue #11)."
@@ -633,16 +642,19 @@ tasks.register<Test>("packagingTest") {
     classpath = jvmTest.map { it.classpath }.get()
     filter { includeTestsMatching("dev.nucleusframework.pdfium.PackagedBinariesTest") }
 
-    iosCinteropKlibTaskNames.forEach { dependsOn(it) }
+    if (iosPackagingSupported) iosCinteropKlibTaskNames.forEach { dependsOn(it) }
     dependsOn("wasmJsProcessResources", "jsProcessResources")
 
     val args = objects.newInstance<PackagedBinariesArgumentProvider>()
-    args.iosKlibs.from(
-        layout.buildDirectory.dir("libs").map { dir ->
-            dir.asFileTree.matching { include("*Cinterop*.klib") }
-        },
-    )
-    args.iosKlibs.builtBy(iosCinteropKlibTaskNames.map { tasks.named(it) })
+    args.iosSupported.set(iosPackagingSupported)
+    if (iosPackagingSupported) {
+        args.iosKlibs.from(
+            layout.buildDirectory.dir("libs").map { dir ->
+                dir.asFileTree.matching { include("*Cinterop*.klib") }
+            },
+        )
+        args.iosKlibs.builtBy(iosCinteropKlibTaskNames.map { tasks.named(it) })
+    }
     args.webRoots.from(layout.buildDirectory.dir("processedResources/wasmJs/main"))
     args.webRoots.from(layout.buildDirectory.dir("processedResources/js/main"))
     args.webRoots.builtBy("wasmJsProcessResources", "jsProcessResources")

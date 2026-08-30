@@ -19,6 +19,12 @@ class PackagedBinariesTest {
 
     @Test
     fun iosCinteropKlibsEmbedLibpdfium() {
+        if (System.getProperty("pdfium.ios.supported") != "true") {
+            // Apple cinterop needs a macOS host, so there is nothing to inspect
+            // here. The `packaging-ios` CI job runs this same test on macOS.
+            println("iOS klibs are not built on this host — skipping")
+            return
+        }
         val klibs = artefactFiles("pdfium.ios.cinterop.klibs")
         assertTrue(klibs.isNotEmpty(), "no iOS cinterop klibs were handed to the test")
         klibs.forEach { klib ->
