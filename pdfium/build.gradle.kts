@@ -490,12 +490,12 @@ val generatePdfiumGlueSource = tasks.register<GeneratePdfiumGlueSourceTask>("gen
     mustRunAfter(installPdfiumWasm, generatePdfiumWasmRuntime)
 }
 
-kotlin.sourceSets.getByName("webMain").kotlin.srcDir(pdfiumGlueGeneratedDir)
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().configureEach {
-    if ("Js" in name || "Wasm" in name || "Web" in name || "Metadata" in name) {
-        dependsOn(generatePdfiumGlueSource)
-    }
-}
+// Carry the producer along with the source directory so every consumer picks the
+// dependency up on its own — the web compile tasks *and* each `…SourcesJar`, which
+// matching on compile-task names silently missed.
+kotlin.sourceSets.getByName("webMain").kotlin.srcDir(
+    files(pdfiumGlueGeneratedDir).builtBy(generatePdfiumGlueSource),
+)
 
 val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
     group = "pdfium"
