@@ -52,32 +52,35 @@ async function rpc(op, args, transfer) {
 
 // ---- exported API ---------------------------------------------------------------------
 
-export function openDocument(buffer, password) {
+// Exposed on globalThis so Kotlin/JS and Kotlin/Wasm can call them without a
+// webpack `@JsModule("./pdfium_glue.mjs")` resolution (issue #11). The script
+// is eval'd once from Kotlin; ES-module `export` is invisible to that path.
+globalThis.pdfiumOpenDocument = function (buffer, password) {
     // `buffer` is the raw PDF ArrayBuffer — transfer it so the main thread doesn't keep
     // a second copy alive for the document's lifetime.
     return rpc('open', { buffer, password }, [buffer]);
-}
+};
 
-export function closeDocument(doc) {
+globalThis.pdfiumCloseDocument = function (doc) {
     return rpc('close', { doc });
-}
+};
 
-export function pageSize(doc, pageIndex) {
+globalThis.pdfiumPageSize = function (doc, pageIndex) {
     return rpc('pageSize', { doc, pageIndex });
-}
+};
 
-export function renderPage(doc, pageIndex, w, h, flags) {
+globalThis.pdfiumRenderPage = function (doc, pageIndex, w, h, flags) {
     return rpc('render', { doc, pageIndex, w, h, flags });
-}
+};
 
-export function pageText(doc, pageIndex) {
+globalThis.pdfiumPageText = function (doc, pageIndex) {
     return rpc('text', { doc, pageIndex });
-}
+};
 
-export function pageTextLayout(doc, pageIndex) {
+globalThis.pdfiumPageTextLayout = function (doc, pageIndex) {
     return rpc('layout', { doc, pageIndex });
-}
+};
 
-export function pageLinks(doc, pageIndex) {
+globalThis.pdfiumPageLinks = function (doc, pageIndex) {
     return rpc('links', { doc, pageIndex });
-}
+};

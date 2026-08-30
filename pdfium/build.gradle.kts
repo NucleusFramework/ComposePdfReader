@@ -6,15 +6,17 @@ import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputFiles
-import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
+import org.gradle.process.CommandLineArgumentProvider
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -64,17 +66,23 @@ val androidTriplets: List<Pair<String, String>> = listOf(
     "x86" to "pdfium-android-x86",
 )
 
-val iosTriplets: List<Pair<String, String>> = listOf(
-    "ios-arm64" to "pdfium-ios-device-arm64",
-    "ios-simulator-arm64" to "pdfium-ios-simulator-arm64",
-)
+// iOS needs a *static* libpdfium so cinterop can pack it into the klib and Maven
+// consumers link without any -L or embedded framework (issue #11). bblanchon ships
+// Apple platforms as a dylib only, so NucleusFramework/pdfium-binaries (a fork of
+// their build harness) runs the same steps with `build_type=static` and publishes
+// the archives per chromium build.
+val pdfiumIosBuild = pdfiumVersion.substringAfterLast('/')
+val pdfiumIosArchive = "pdfium-ios-static-$pdfiumIosBuild"
+val pdfiumIosUrl = "https://github.com/NucleusFramework/pdfium-binaries/releases/download/" +
+    "ios-static-$pdfiumIosBuild/$pdfiumIosArchive.tgz"
+
+val iosTriplets: List<String> = listOf("ios-arm64", "ios-simulator-arm64")
 
 val wasmArchive = "pdfium-wasm"
 
 val allArchives: Set<String> =
     (jvmTriplets.map { it.archive } +
         androidTriplets.map { it.second } +
-        iosTriplets.map { it.second } +
         listOf(wasmArchive)).toSet()
 
 val downloadTasks: Map<String, TaskProvider<Download>> = allArchives.associateWith { archive ->
@@ -94,6 +102,21 @@ val extractTasks: Map<String, TaskProvider<Copy>> = allArchives.associateWith { 
         from({ tarTree(resources.gzip(dl.get().dest)) })
         into(pdfiumExtractDir.map { it.dir(archive) })
     }
+}
+
+val downloadPdfiumIos = tasks.register<Download>("downloadPdfiumIos") {
+    src(pdfiumIosUrl)
+    dest(pdfiumDownloadsDir.map { it.file("$pdfiumIosArchive.tgz") })
+    overwrite(false)
+    onlyIfModified(true)
+    retries(2)
+}
+
+// The archive unpacks to `<pdfiumIosArchive>/{include,lib/<triplet>}`.
+val extractPdfiumIos = tasks.register<Copy>("extractPdfiumIos") {
+    dependsOn(downloadPdfiumIos)
+    from({ tarTree(resources.gzip(downloadPdfiumIos.get().dest)) })
+    into(pdfiumExtractDir.map { it.dir("ios-static") })
 }
 
 kotlin {
@@ -275,84 +298,48 @@ abstract class InstallHeadersTask : DefaultTask() {
     }
 }
 
-abstract class EmbedPdfiumDylibTask : DefaultTask() {
-    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val stagedLibsRoot: DirectoryProperty
-
-    @get:Input abstract val platformName: Property<String>
-    @get:Input abstract val targetBuildDir: Property<String>
-    @get:Input abstract val frameworksFolderPath: Property<String>
-    @get:Input @get:Optional abstract val signIdentity: Property<String>
-    @get:Input @get:Optional abstract val signingRequired: Property<String>
-
-    @get:javax.inject.Inject abstract val execOps: org.gradle.process.ExecOperations
-
-    @TaskAction
-    fun run() {
-        val platform = platformName.get()
-        require(platform.isNotBlank()) { "PLATFORM_NAME not set — run this task from Xcode." }
-        val triplet = when {
-            platform.startsWith("iphonesimulator") -> "ios-simulator-arm64"
-            platform.startsWith("iphoneos") -> "ios-arm64"
-            else -> error("Unsupported PLATFORM_NAME: '$platform'")
-        }
-        val dylib = stagedLibsRoot.get().dir(triplet).file("libpdfium.dylib").asFile
-        require(dylib.exists()) { "libpdfium.dylib missing at ${dylib.absolutePath}" }
-
-        val buildDir = targetBuildDir.get()
-        val frameworks = frameworksFolderPath.get()
-        require(buildDir.isNotBlank() && frameworks.isNotBlank()) {
-            "TARGET_BUILD_DIR / FRAMEWORKS_FOLDER_PATH must be set by Xcode."
-        }
-        val dest = File("$buildDir/$frameworks").apply { mkdirs() }.resolve(dylib.name)
-        dylib.copyTo(dest, overwrite = true)
-
-        if (signingRequired.orNull != "NO") {
-            val identity = signIdentity.orNull?.takeIf { it.isNotBlank() } ?: "-"
-            execOps.exec {
-                commandLine("codesign", "--force", "--sign", identity, dest.absolutePath)
-            }
-        }
-    }
-}
-
+/**
+ * Stages one static `libpdfium.a` per Konan target plus the matching public
+ * headers. cinterop then packs the archive into the klib, so the published
+ * library carries the iOS machine code and consumers need no linker
+ * configuration at all (issue #11).
+ */
 abstract class InstallIosTask : DefaultTask() {
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val sources: ConfigurableFileCollection
-    @get:Input abstract val triplets: ListProperty<String> // "triplet|archive"
-    @get:Input abstract val archiveToDir: org.gradle.api.provider.MapProperty<String, String>
+    @get:Input abstract val releaseRoot: Property<String>
+    @get:Input abstract val triplets: ListProperty<String>
     @get:OutputDirectory abstract val outputRoot: DirectoryProperty
-
-    @get:javax.inject.Inject abstract val execOps: org.gradle.process.ExecOperations
+    @get:OutputDirectory abstract val headersDir: DirectoryProperty
 
     @TaskAction
     fun run() {
+        val release = File(releaseRoot.get())
         val root = outputRoot.get().asFile
-        val mapping = archiveToDir.get()
-        triplets.get().forEach { pair ->
-            val (triplet, archive) = pair.split('|', limit = 2)
-            val libDirPath = mapping[archive] ?: return@forEach
-            val libDir = File("$libDirPath/lib")
-            val target = root.resolve(triplet).apply { mkdirs() }
-            libDir.listFiles()?.forEach { src ->
-                if (src.name.endsWith(".dylib")) {
-                    val dst = target.resolve(src.name)
-                    src.copyTo(dst, overwrite = true)
-                    // bblanchon ships the dylib with install_name "./libpdfium.dylib".
-                    // Rewrite to @rpath so consumer apps can embed it under Frameworks/.
-                    execOps.exec {
-                        commandLine("install_name_tool", "-id", "@rpath/${src.name}", dst.absolutePath)
-                    }
-                }
-            }
+        triplets.get().forEach { triplet ->
+            val archive = release.resolve("lib/$triplet/libpdfium.a")
+            require(archive.exists()) { "pdfium: ${archive.absolutePath} missing" }
+            val target = root.resolve(triplet)
+            target.deleteRecursively()
+            target.mkdirs()
+            archive.copyTo(target.resolve("libpdfium.a"), overwrite = true)
         }
+        // Bind the cinterop to the headers the staged archives were built from,
+        // so no stub can reference a symbol the archive doesn't define.
+        val include = release.resolve("include")
+        require(include.isDirectory) { "pdfium: ${include.absolutePath} missing" }
+        include.copyRecursively(headersDir.get().asFile.apply { mkdirs() }, overwrite = true)
     }
 }
 
 val nativeJniResourceDir = layout.projectDirectory.dir("src/jvmMain/resources/pdfium/native")
 val androidJniLibsDir = layout.projectDirectory.dir("src/androidMain/jniLibs")
 val iosStaticLibsDir = layout.projectDirectory.dir("src/nativeInterop/libs")
-val wasmResourceDir = layout.projectDirectory.dir("src/webMain/resources/pdfium")
+val iosHeadersDir = layout.buildDirectory.dir("pdfium/ios-include")
+// Flat resource root so webpack/dev-server resolve `./pdfium_glue.mjs` and
+// `pdfium_worker.mjs` from the bundle root (issue #11). Nested `pdfium/` made
+// the files invisible to `@JsModule("./pdfium_glue.mjs")`.
+val wasmResourceDir = layout.projectDirectory.dir("src/webMain/resources")
 val stagedHeadersDir = layout.buildDirectory.dir("pdfium/include")
 
 fun extractedDir(archive: String) = pdfiumExtractDir.map { it.dir(archive) }
@@ -454,30 +441,70 @@ val generatePdfiumWasmRuntime = tasks.register("generatePdfiumWasmRuntime") {
     }
 }
 
-val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
-    group = "pdfium"
-    description = "Install iOS PDFium dynamic libs for cinterop."
-    iosTriplets.forEach { (_, archive) ->
-        sources.from(extractTasks.getValue(archive).map { it.outputs.files })
+abstract class GeneratePdfiumGlueSourceTask : DefaultTask() {
+    @get:InputFile @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val glueMjs: RegularFileProperty
+
+    @get:org.gradle.api.tasks.OutputFile
+    abstract val outputKt: RegularFileProperty
+
+    @TaskAction
+    fun run() {
+        val jsText = glueMjs.get().asFile.readText()
+        val escaped = buildString(jsText.length + 64) {
+            append('"')
+            for (c in jsText) when (c) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                in '\u0000'..'\u001F' -> append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                '\u2028' -> append("\\u2028")
+                '\u2029' -> append("\\u2029")
+                else -> append(c)
+            }
+            append('"')
+        }
+        val out = outputKt.get().asFile
+        out.parentFile.mkdirs()
+        out.writeText(
+            """
+            |package dev.nucleusframework.pdfium
+            |
+            |internal const val PDFIUM_GLUE_JS: String = $escaped
+            |
+            """.trimMargin(),
+        )
     }
-    dependsOn(installPdfiumHeaders)
-    triplets.set(iosTriplets.map { "${it.first}|${it.second}" })
-    archiveToDir.set(iosTriplets.associate { it.second to pdfiumExtractDir.get().dir(it.second).asFile.absolutePath })
-    outputRoot.set(iosStaticLibsDir)
 }
 
-val embedPdfiumDylibForXcode = tasks.register<EmbedPdfiumDylibTask>("embedPdfiumDylibForXcode") {
+val pdfiumGlueGeneratedDir = layout.buildDirectory.dir("generated/pdfiumGlue/kotlin")
+val generatePdfiumGlueSource = tasks.register<GeneratePdfiumGlueSourceTask>("generatePdfiumGlueSource") {
     group = "pdfium"
-    description = "Copy & sign libpdfium.dylib into the iOS app bundle. Invoked from Xcode build phase."
-    dependsOn(installPdfiumIos)
-    outputs.upToDateWhen { false }
+    description = "Embed pdfium_glue.mjs as a Kotlin string so web targets eval it without webpack (issue #11)."
+    glueMjs.set(layout.projectDirectory.file("src/webMain/resources/pdfium_glue.mjs"))
+    outputKt.set(pdfiumGlueGeneratedDir.map { it.file("dev/nucleusframework/pdfium/PdfiumGlueSource.kt") })
+    mustRunAfter(installPdfiumWasm, generatePdfiumWasmRuntime)
+}
 
-    stagedLibsRoot.set(iosStaticLibsDir)
-    platformName.set(providers.environmentVariable("PLATFORM_NAME").orElse(""))
-    targetBuildDir.set(providers.environmentVariable("TARGET_BUILD_DIR").orElse(""))
-    frameworksFolderPath.set(providers.environmentVariable("FRAMEWORKS_FOLDER_PATH").orElse(""))
-    signIdentity.set(providers.environmentVariable("EXPANDED_CODE_SIGN_IDENTITY").orElse(""))
-    signingRequired.set(providers.environmentVariable("CODE_SIGNING_REQUIRED").orElse(""))
+kotlin.sourceSets.getByName("webMain").kotlin.srcDir(pdfiumGlueGeneratedDir)
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().configureEach {
+    if ("Js" in name || "Wasm" in name || "Web" in name || "Metadata" in name) {
+        dependsOn(generatePdfiumGlueSource)
+    }
+}
+
+val installPdfiumIos = tasks.register<InstallIosTask>("installPdfiumIos") {
+    group = "pdfium"
+    description = "Stage the static PDFium archives + headers for the iOS cinterop."
+    sources.from(extractPdfiumIos.map { it.outputs.files })
+    releaseRoot.set(pdfiumExtractDir.get().dir("ios-static/$pdfiumIosArchive").asFile.absolutePath)
+    triplets.set(iosTriplets)
+    outputRoot.set(iosStaticLibsDir)
+    headersDir.set(iosHeadersDir)
 }
 
 // ---------- JNI glue compilation ----------
@@ -563,11 +590,78 @@ tasks.matching { it.name == "preBuild" || it.name == "preDebugBuild" || it.name 
     dependsOn(installPdfiumAndroidJniLibs, installPdfiumHeaders)
 }
 
-if (Os.isFamily(Os.FAMILY_MAC)) {
-    tasks.matching { it.name.startsWith("cinteropPdfium") }.configureEach {
-        dependsOn(installPdfiumIos)
+tasks.matching { it.name.startsWith("cinteropPdfium") }.configureEach {
+    dependsOn(installPdfiumIos)
+}
+
+// ---------- Packaged-binaries regression (issue #11) ----------
+
+abstract class PackagedBinariesArgumentProvider : CommandLineArgumentProvider {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val iosKlibs: ConfigurableFileCollection
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val webRoots: ConfigurableFileCollection
+
+    @get:Input
+    abstract val iosSupported: Property<Boolean>
+
+    override fun asArguments(): MutableIterable<String> = mutableListOf(
+        "-Dpdfium.ios.supported=${iosSupported.get()}",
+        "-Dpdfium.ios.cinterop.klibs=${iosKlibs.files.joinToString(File.pathSeparator)}",
+        "-Dpdfium.web.klibs=${webRoots.files.joinToString(File.pathSeparator)}",
+    )
+}
+
+tasks.named<Test>("jvmTest") {
+    filter {
+        excludeTestsMatching("dev.nucleusframework.pdfium.PackagedBinariesTest")
     }
 }
+
+// The klibs Maven consumers receive are the packed ones in build/libs, produced
+// by the `…Cinterop-pdfiumKlib` tasks — not by cinterop itself, which only writes
+// the unpacked directory under build/classes. Assert against the former.
+val iosCinteropKlibTaskNames = listOf(
+    "iosArm64Cinterop-pdfiumKlib",
+    "iosSimulatorArm64Cinterop-pdfiumKlib",
+)
+
+// KGP disables cross compilation for targets that declare cinterops, so the iOS
+// klibs simply don't exist off a macOS host. The web half still runs everywhere;
+// the iOS half is covered by the `packaging-ios` CI job and by the publish run.
+val iosPackagingSupported = Os.isFamily(Os.FAMILY_MAC)
+
+tasks.register<Test>("packagingTest") {
+    group = "verification"
+    description = "Assert iOS/web PDFium binaries are packaged into published klibs (issue #11)."
+    val jvmTest = tasks.named<Test>("jvmTest")
+    testClassesDirs = jvmTest.map { it.testClassesDirs }.get()
+    classpath = jvmTest.map { it.classpath }.get()
+    filter { includeTestsMatching("dev.nucleusframework.pdfium.PackagedBinariesTest") }
+
+    if (iosPackagingSupported) iosCinteropKlibTaskNames.forEach { dependsOn(it) }
+    dependsOn("wasmJsProcessResources", "jsProcessResources")
+
+    val args = objects.newInstance<PackagedBinariesArgumentProvider>()
+    args.iosSupported.set(iosPackagingSupported)
+    if (iosPackagingSupported) {
+        args.iosKlibs.from(
+            layout.buildDirectory.dir("libs").map { dir ->
+                dir.asFileTree.matching { include("*Cinterop*.klib") }
+            },
+        )
+        args.iosKlibs.builtBy(iosCinteropKlibTaskNames.map { tasks.named(it) })
+    }
+    args.webRoots.from(layout.buildDirectory.dir("processedResources/wasmJs/main"))
+    args.webRoots.from(layout.buildDirectory.dir("processedResources/js/main"))
+    args.webRoots.builtBy("wasmJsProcessResources", "jsProcessResources")
+    jvmArgumentProviders.add(args)
+}
+
+tasks.named("check") { dependsOn("packagingTest") }
 
 // ---------- Smoke test ----------
 

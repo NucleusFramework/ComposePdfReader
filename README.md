@@ -75,15 +75,36 @@ compose.desktop {
 }
 ```
 
+### iOS packaging
+
+Nothing to do. A static `libpdfium.a` is packed into the published iOS cinterop
+klib, so it is linked straight into your framework — no `linkerOpts`, no
+`LIBRARY_SEARCH_PATHS`, no `ThirdParty/` drop, nothing to embed or codesign, and
+no extra Xcode build phase. The stock Compose one is enough:
+
+```
+./gradlew :composeApp:embedAndSignAppleFrameworkForXcode
+```
+
+Both `isStatic = true` and `isStatic = false` frameworks work.
+
+The static archive is not something bblanchon publishes (they ship Apple
+platforms as a `.dylib`, which a klib cannot carry). It is built from their own
+harness with `build_type=static` by
+[NucleusFramework/pdfium-binaries](https://github.com/NucleusFramework/pdfium-binaries),
+a fork that tracks upstream releases daily and publishes an `ios-static-<build>`
+release per PDFium version; `:pdfium:installPdfiumIos` downloads the archive
+matching the `pdfium-bblanchon` pin.
+
 ### Web packaging (wasmJS / JS)
 
-For the browser targets, the `pdfium.wasm` + worker assets are published as
-classpath resources inside the library artifact and served from the module
-root. If you bundle your app with the default Kotlin/JS webpack pipeline, no
-extra configuration is needed — the `@JsModule("./pdfium_glue.mjs")` imports
-resolve against your webpack output directory. Remember to serve the site over
-HTTPS (or `localhost`): the Web Clipboard API used by text copy only works in
-secure contexts.
+For the browser targets, `pdfium.wasm`, `pdfium_worker.mjs`,
+`pdfium_runtime.mjs` and `pdfium_glue.mjs` are published as classpath
+resources at the artefact root and served from the bundle root. The glue is
+eval'd from Kotlin (no webpack `./pdfium_glue.mjs` resolution), so a
+consumer using the default Kotlin/JS webpack pipeline needs no extra copy
+task. Remember to serve the site over HTTPS (or `localhost`): the Web
+Clipboard API used by text copy only works in secure contexts.
 
 ## Getting started — a tour
 
@@ -670,9 +691,12 @@ Key facts:
 
 - **Native binary delivery.** `pdfium/build.gradle.kts` registers a set of
   Gradle tasks that download the bblanchon archives, extract them, and stage
-  them as classpath resources (JVM) / jniLibs (Android) / static libs
-  (iOS cinterop). The JNI glue is rebuilt from `pdfium_jni.cpp` via
-  `build-linux.sh` / `build-macos.sh` / `build-windows.bat`.
+  them as classpath resources (JVM) / jniLibs (Android) / root-level wasm+JS
+  assets (web). iOS instead downloads the static archive from the
+  `pdfium-binaries` fork and lets cinterop pack it into the klib
+  (`staticLibraries` in `pdfium.def`). The JNI glue is rebuilt from
+  `pdfium_jni.cpp` via `build-linux.sh` / `build-macos.sh` /
+  `build-windows.bat`.
 
 - **Shared document buffer.** The JVM/Android path copies the PDF bytes into
   a native buffer once via `nAllocBuffer`, then hands that buffer address to
@@ -739,7 +763,9 @@ drops `libpdfium.so` into `src/androidMain/jniLibs/<abi>/`.
 ### iOS
 
 Open `iosApp/` in Xcode and run. The Gradle side has to run on a macOS host
-for the cinterop + framework link to succeed.
+for the framework link to succeed (the cinterop itself cross-compiles from any
+host). The Xcode "Compile Kotlin Framework" phase is the stock
+`embedAndSignAppleFrameworkForXcode` — PDFium is already inside the framework.
 
 ### Smoke test
 

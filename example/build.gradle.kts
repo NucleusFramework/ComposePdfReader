@@ -127,10 +127,10 @@ dependencies {
 }
 
 // The :pdfium module ships pdfium_glue.mjs, pdfium_runtime.mjs (wrapped emscripten JS),
-// and pdfium.wasm. We copy the trio flat into composeApp's incremental sync dir (next
-// to composeApp.mjs) so `@JsModule("./pdfium_glue.mjs")` resolves against it — the same
-// layout kotlin-wasm-examples/browser-c-interop uses for its own .mjs/.wasm pair.
-val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/webMain/resources/pdfium")
+// pdfium_worker.mjs and pdfium.wasm at the resource root. Copy them flat into
+// composeApp's incremental sync dir (next to composeApp.mjs) and processedResources
+// so the worker URL `pdfium_worker.mjs` and wasm fetch resolve at the bundle root.
+val pdfiumWasmDir = project(":pdfium").layout.projectDirectory.dir("src/webMain/resources")
 
 val isProductionWeb = project.hasProperty("isProduction")
     || project.gradle.startParameter.taskNames.any { it.endsWith("Distribution") }
