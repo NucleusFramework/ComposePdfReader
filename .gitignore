@@ -21,12 +21,16 @@ node_modules/
 *.dylib
 *.dll
 
+# iOS PDFium static archives staged by :pdfium:installPdfiumIos from the
+# paulocoutinhox/pdfium-lib release. Redownloaded on every build.
+pdfium/src/nativeInterop/libs/
+
 # PDFium wasm artefacts staged by the :pdfium:installPdfiumWasm and
 # :pdfium:generatePdfiumWasmRuntime Gradle tasks (source is the bblanchon
 # pdfium-wasm tarball downloaded at build time). Regenerated on every build.
-pdfium/src/webMain/resources/pdfium/pdfium.wasm
-pdfium/src/webMain/resources/pdfium/pdfium.js
-pdfium/src/webMain/resources/pdfium/pdfium_runtime.mjs
+pdfium/src/webMain/resources/pdfium.wasm
+pdfium/src/webMain/resources/pdfium.js
+pdfium/src/webMain/resources/pdfium_runtime.mjs
 
 # Root-level test PDFs.
 /*.pdf

@@ -3,15 +3,17 @@ language = C
 headers = fpdfview.h fpdf_doc.h fpdf_formfill.h fpdf_text.h
 headerFilter = fpdf*.h
 
-# Headers are staged by the Gradle task `installPdfiumHeaders` under build/pdfium/include.
-compilerOpts = -Ibuild/pdfium/include
+# Headers and archives are staged by `installPdfiumIos` from the
+# paulocoutinhox/pdfium-lib release — the only PDFium build that publishes a
+# *static* iOS library (bblanchon is dylib-only on Apple platforms).
+compilerOpts = -Ibuild/pdfium/ios-include
 
-# iOS device (arm64). bblanchon ships a dynamic lib; consumer app must embed libpdfium.dylib.
+# cinterop packs the archive into the klib (default/targets/<target>/included/),
+# so the published artefact carries the machine code and consumers link with no
+# -L, no ThirdParty drop and nothing to embed or sign (issue #11).
+staticLibraries = libpdfium.a
 libraryPaths.ios_arm64 = src/nativeInterop/libs/ios-arm64
-linkerOpts.ios_arm64 = -lpdfium
-
-# iOS simulator (arm64).
 libraryPaths.ios_simulator_arm64 = src/nativeInterop/libs/ios-simulator-arm64
-linkerOpts.ios_simulator_arm64 = -lpdfium
 
+# PDFium only needs CoreGraphics/CoreFoundation plus the C++ runtime.
 linkerOpts = -framework CoreGraphics -framework Foundation -lc++

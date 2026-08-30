@@ -16,7 +16,7 @@ jobs:
   detect:
     runs-on: ubuntu-latest
     outputs:
-      needs_bump: ${{ steps.compare.outputs.needs_bump }}
+      needs_bump: ${{ steps.compare.outputs.needs_bump == 'true' && steps.ios_static.outputs.ready == 'true' }}
       chromium_tag: ${{ steps.upstream.outputs.tag_name }}
       full_version: ${{ steps.upstream.outputs.full_version }}
       branch: ${{ steps.push.outputs.branch }}
@@ -57,8 +57,29 @@ jobs:
             echo "needs_bump=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check tag does not already exist
+      - name: Require the static iOS build to be published
+        # iOS links against a static libpdfium.a that bblanchon doesn't ship;
+        # NucleusFramework/pdfium-binaries builds it from the same tag and
+        # publishes it as `ios-static-<build>` at 01:00 UTC. If it isn't there
+        # yet, skip this run rather than bumping to a version the iOS cinterop
+        # cannot resolve — the next cron run picks it up.
         if: steps.compare.outputs.needs_bump == 'true'
+        id: ios_static
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build="${{ steps.upstream.outputs.chromium_branch }}"
+          if gh release view "ios-static-$build" --repo NucleusFramework/pdfium-binaries >/dev/null 2>&1; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Static iOS build ios-static-$build is available."
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ios-static-$build not published yet — deferring the bump to the next run."
+          fi
+
+      - name: Check tag does not already exist
+        if: steps.compare.outputs.needs_bump == 'true' && steps.ios_static.outputs.ready == 'true'
         run: |
           set -euo pipefail
           tag="v${{ steps.upstream.outputs.full_version }}"
@@ -68,7 +89,7 @@ jobs:
           fi
 
       - name: Push bump branch
-        if: steps.compare.outputs.needs_bump == 'true'
+        if: steps.compare.outputs.needs_bump == 'true' && steps.ios_static.outputs.ready == 'true'
         id: push
         run: |
           set -euo pipefail
