@@ -18,7 +18,7 @@ material3 = "1.10.0-alpha05"
 # Drives every platform. iOS additionally needs a static build, which
 # NucleusFramework/pdfium-binaries publishes per chromium build as
 # `ios-static-<build>` (see :pdfium:installPdfiumIos).
-pdfium-bblanchon = "chromium/8076"
+pdfium-bblanchon = "chromium/8086"
 download-plugin = "5.6.0"
 okio = "3.9.1"
 filekit = "0.13.0"
