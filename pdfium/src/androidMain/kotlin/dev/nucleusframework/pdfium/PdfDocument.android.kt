@@ -6,9 +6,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import dev.nucleusframework.pdfium.jvm.FPDF_ANNOT
 import dev.nucleusframework.pdfium.jvm.Pdfium
 import dev.nucleusframework.pdfium.jvm.PdfiumBridge
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
@@ -19,8 +17,6 @@ internal actual class PdfDocument internal constructor(
     // Per-document FPDF_FORMHANDLE (parallel to [handles]). May be 0 if PDFium refused;
     // render code falls back to no widget overlay in that case.
     private val formHandles: LongArray,
-    private val dispatchers: Array<CoroutineDispatcher>,
-    private val executors: Array<ExecutorService>,
 ) {
     actual val pageCount: Int = PdfiumBridge.nGetPageCount(handles[0])
     actual val metadata: PdfMetadata = PdfMetadata(
@@ -37,7 +33,7 @@ internal actual class PdfDocument internal constructor(
 
     actual suspend fun pageSize(pageIndex: Int): PageSize {
         val slot = pickSlot()
-        return withContext(dispatchers[slot]) {
+        return withContext(Pdfium.sharedDispatcher) {
             val handle = handles[slot]
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
             if (page == 0L) return@withContext PageSize(0f, 0f)
@@ -59,7 +55,7 @@ internal actual class PdfDocument internal constructor(
         quality: RenderQuality,
     ): ImageBitmap {
         val slot = pickSlot()
-        return withContext(dispatchers[slot]) {
+        return withContext(Pdfium.sharedDispatcher) {
             val handle = handles[slot]
             val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
@@ -85,7 +81,7 @@ internal actual class PdfDocument internal constructor(
 
     actual suspend fun pageText(pageIndex: Int): String {
         val slot = pickSlot()
-        return withContext(dispatchers[slot]) {
+        return withContext(Pdfium.sharedDispatcher) {
             val handle = handles[slot]
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
             if (page == 0L) return@withContext ""
@@ -99,7 +95,7 @@ internal actual class PdfDocument internal constructor(
 
     actual suspend fun pageTextLayout(pageIndex: Int): PageTextLayout {
         val slot = pickSlot()
-        return withContext(dispatchers[slot]) {
+        return withContext(Pdfium.sharedDispatcher) {
             val handle = handles[slot]
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
             if (page == 0L) return@withContext PageTextLayout.Empty
@@ -143,7 +139,7 @@ internal actual class PdfDocument internal constructor(
 
     actual suspend fun pageLinks(pageIndex: Int): PageLinks {
         val slot = pickSlot()
-        return withContext(dispatchers[slot]) {
+        return withContext(Pdfium.sharedDispatcher) {
             val handle = handles[slot]
             val page = PdfiumBridge.nLoadPage(handle, pageIndex)
             if (page == 0L) return@withContext PageLinks.Empty
@@ -169,7 +165,7 @@ internal actual class PdfDocument internal constructor(
     actual fun close() {
         runBlocking {
             for (i in handles.indices) {
-                withContext(dispatchers[i]) {
+                withContext(Pdfium.sharedDispatcher) {
                     // Form-fill env must be torn down BEFORE its underlying document.
                     PdfiumBridge.nCloseFormEnv(formHandles[i])
                     PdfiumBridge.nCloseDocument(handles[i])
@@ -177,7 +173,6 @@ internal actual class PdfDocument internal constructor(
             }
         }
         PdfiumBridge.nFreeBuffer(bufferAddr)
-        executors.forEach { it.shutdown() }
     }
 
     private fun RenderQuality.toFlags(): Int = when (this) {
@@ -206,11 +201,8 @@ internal actual suspend fun openPdfDocument(bytes: ByteArray, password: String?)
                 }
                 handles[i] = h
             }
-            val pairs = Array(POOL_SIZE) { Pdfium.newDispatcher() }
-            val dispatchers = Array(POOL_SIZE) { pairs[it].first }
-            val executors = Array(POOL_SIZE) { pairs[it].second }
             val formHandles = LongArray(POOL_SIZE) { PdfiumBridge.nInitFormEnv(handles[it]) }
-            PdfDocument(bufferAddr, bytes.size, handles, formHandles, dispatchers, executors)
+            PdfDocument(bufferAddr, bytes.size, handles, formHandles)
         } catch (t: Throwable) {
             PdfiumBridge.nFreeBuffer(bufferAddr)
             throw t
